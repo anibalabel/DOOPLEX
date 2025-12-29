@@ -10,7 +10,7 @@ import { GoogleGenAI, Type } from "@google/genai";
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
 import { 
   getFirestore, collection, addDoc, getDocs, updateDoc, deleteDoc, doc, 
-  query, orderBy, onSnapshot, setDoc, where, writeBatch
+  query, orderBy, onSnapshot, setDoc, where, writeBatch, getDoc
 } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js";
 
 // --- Configuración de Firebase ---
@@ -108,6 +108,7 @@ const App = () => {
   const [tmdbSearchResults, setTmdbSearchResults] = useState<any[]>([]);
   const [isSearchingTmdb, setIsSearchingTmdb] = useState(false);
   const [isFetchingSeasons, setIsFetchingSeasons] = useState(false);
+  const [isFetchingEpisodes, setIsFetchingEpisodes] = useState(false);
   
   const [posterPreviewUrl, setPosterPreviewUrl] = useState("");
   const [bannerPreviewUrl, setBannerPreviewUrl] = useState("");
@@ -248,6 +249,87 @@ const App = () => {
       setIsBatchOpen(false);
     } catch (err) { alert("Error en proceso masivo."); }
     finally { setIsSaving(false); }
+  };
+
+  const fetchEpisodesFromTmdb = async () => {
+    const seriesId = navStack.find(n => n.type === 'series')?.id;
+    const seasonId = navStack.find(n => n.type === 'season')?.id;
+    if (!seriesId || !seasonId) return;
+
+    const currentSeries = seriesList.find(s => s.id === seriesId);
+    if (!currentSeries?.TMDB_id) {
+        alert("Esta serie no tiene un TMDB_id asignado.");
+        return;
+    }
+
+    setIsFetchingEpisodes(true);
+    try {
+      // Obtenemos el seasonNumber desde Firestore para estar seguros
+      const seasonDoc = await getDoc(doc(db, `series/${seriesId}/seasons`, seasonId));
+      if (!seasonDoc.exists()) {
+          alert("No se encontró la temporada en la base de datos.");
+          return;
+      }
+      const seasonData = seasonDoc.data();
+      const seasonNumber = seasonData.seasonNumber;
+
+      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+      const prompt = `Utilizando la API de TMDB para el programa de TV con ID ${currentSeries.TMDB_id}, obtén todos los episodios de la temporada ${seasonNumber}. 
+      Devuelve solo un array JSON de objetos con: episodeNumber, title, overview, duration (en minutos), thumbnail (URL de la imagen del episodio).`;
+      
+      const response = await ai.models.generateContent({
+        model: 'gemini-3-flash-preview',
+        contents: prompt,
+        config: {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                episodeNumber: { type: Type.NUMBER },
+                title: { type: Type.STRING },
+                overview: { type: Type.STRING },
+                duration: { type: Type.NUMBER },
+                thumbnail: { type: Type.STRING }
+              },
+              required: ["episodeNumber", "title"]
+            }
+          }
+        }
+      });
+
+      const episodes = JSON.parse(response.text || "[]");
+      if (episodes.length === 0) {
+        alert("No se encontraron episodios para esta temporada.");
+        return;
+      }
+
+      if (confirm(`Se han encontrado ${episodes.length} episodios. ¿Deseas importarlos todos?`)) {
+        const batch = writeBatch(db);
+        const episodesColRef = collection(db, `series/${seriesId}/seasons/${seasonId}/episodes`);
+        
+        episodes.forEach((ep: any) => {
+            const epDocRef = doc(episodesColRef);
+            batch.set(epDocRef, {
+                episodeNumber: ep.episodeNumber,
+                title: ep.title,
+                overview: ep.overview || "",
+                duration: ep.duration || 0,
+                thumbnail: ep.thumbnail || "",
+                active: true,
+                createdAt: Date.now()
+            });
+        });
+
+        await batch.commit();
+        alert("Episodios importados con éxito.");
+      }
+    } catch (e) {
+      alert("Error al obtener episodios.");
+    } finally {
+      setIsFetchingEpisodes(false);
+    }
   };
 
   const fetchAllSeasonsFromTmdb = async () => {
@@ -450,6 +532,17 @@ const App = () => {
               >
                 {isFetchingSeasons ? <Loader2 size={18} className="animate-spin" /> : <Download size={18} />}
                 <span>Fetch All Seasons</span>
+              </button>
+            )}
+
+            {currentContext?.type === 'season' && (
+              <button 
+                onClick={fetchEpisodesFromTmdb} 
+                disabled={isFetchingEpisodes}
+                className="bg-slate-900 text-white px-6 py-3 rounded-2xl font-bold text-sm flex items-center space-x-2 shadow-lg hover:bg-slate-800 transition-all active:scale-95 disabled:opacity-50"
+              >
+                {isFetchingEpisodes ? <Loader2 size={18} className="animate-spin" /> : <Download size={18} />}
+                <span>Fetch Episodes</span>
               </button>
             )}
 
