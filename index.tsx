@@ -195,7 +195,7 @@ const App = () => {
       const path = getFirestorePath();
       await deleteDoc(doc(db, path, id));
     } catch (e) { 
-      console.error("Delete error:", e);
+      console.error("Delete error path:", getFirestorePath(), "ID:", id, e);
       alert("Error al eliminar."); 
     }
   };
@@ -339,7 +339,10 @@ const App = () => {
   const fetchEpisodesFromTmdb = async () => {
     const seriesId = navStack.find(n => n.type === 'series')?.id;
     const seasonId = navStack.find(n => n.type === 'season')?.id;
-    if (!seriesId || !seasonId) return;
+    if (!seriesId || !seasonId) {
+        alert("Falta contexto de Serie o Temporada para importar.");
+        return;
+    }
 
     const currentSeries = seriesList.find(s => s.id === seriesId);
     if (!currentSeries?.TMDB_id) {
@@ -351,17 +354,17 @@ const App = () => {
     try {
       const seasonDoc = await getDoc(doc(db, `series/${seriesId}/seasons`, seasonId));
       if (!seasonDoc.exists()) {
-          alert("No se encontró la temporada en la base de datos.");
+          alert("No se encontró la temporada en Firestore.");
           return;
       }
       const seasonData = seasonDoc.data();
       const seasonNumber = seasonData.seasonNumber;
 
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-      const prompt = `Utilizando la API de TMDB para el programa de TV con ID ${currentSeries.TMDB_id}, obtén TODOS los episodios de la temporada ${seasonNumber}. 
-      Para la miniatura de cada episodio, utiliza obligatoriamente el campo 'still_path' de TMDB y conviértelo en una URL completa con el formato 'https://image.tmdb.org/t/p/original/PATH'. 
+      const prompt = `Utilizando la API de TMDB para el programa de TV con ID ${currentSeries.TMDB_id}, obtén todos los episodios de la temporada ${seasonNumber}. 
+      Para la miniatura (thumbnail), utiliza obligatoriamente el campo 'still_path' de TMDB y conviértelo en una URL completa con el formato 'https://image.tmdb.org/t/p/original/PATH'. 
       Si no tiene imagen, deja el campo vacío.
-      Devuelve solo un array JSON de objetos con: episodeNumber, title, overview, duration (en minutos), thumbnail (URL completa de la imagen del episodio).`;
+      Devuelve solo un array JSON de objetos con: episodeNumber, title, overview, duration (en minutos), thumbnail (URL completa).`;
       
       const response = await ai.models.generateContent({
         model: 'gemini-3-flash-preview',
@@ -387,7 +390,7 @@ const App = () => {
 
       const episodes = JSON.parse(response.text || "[]");
       if (episodes.length === 0) {
-        alert("No se encontraron episodios para esta temporada.");
+        alert("No se encontraron episodios en la respuesta del asistente.");
         return;
       }
 
@@ -413,7 +416,7 @@ const App = () => {
       }
     } catch (e) {
       console.error("Fetch episodes error:", e);
-      alert("Error al obtener episodios.");
+      alert("Error crítico al obtener episodios.");
     } finally {
       setIsFetchingEpisodes(false);
     }
@@ -611,7 +614,6 @@ const App = () => {
 
   return (
     <div className="flex min-h-screen bg-[#FDFDFF] font-inter">
-      {/* Sidebar Redesign matching screenshot */}
       <aside className="w-64 bg-white border-r border-slate-100 p-6 flex flex-col space-y-12 sticky top-0 h-screen z-40">
         <div className="flex items-center space-x-3 px-2">
           <div className="w-12 h-12 bg-[#4f46e5] rounded-2xl flex items-center justify-center text-white shadow-xl shadow-indigo-200">
@@ -692,8 +694,7 @@ const App = () => {
             <table className="w-full text-left">
               <thead className="bg-[#fcfcfd] border-b border-slate-50 text-[10px] font-black uppercase text-slate-400 tracking-[0.2em]">
                 <tr>
-                  {currentContext?.type !== 'series' && <th className="px-10 py-7">Recurso</th>}
-                  {currentContext?.type === 'series' && <th className="px-10 py-7">Recurso</th>}
+                  <th className="px-10 py-7">Recurso</th>
                   <th className="px-10 py-7">Info</th>
                   <th className="px-10 py-7 text-center">Estado</th>
                   <th className="px-10 py-7 text-right">Acciones</th>
@@ -702,17 +703,11 @@ const App = () => {
               <tbody className="divide-y divide-slate-50">
                 {(currentContext ? items : (view === 'Movies' ? movies : seriesList)).filter(i => (i.title || i.name || "").toLowerCase().includes(searchQuery.toLowerCase())).map(item => (
                   <tr key={item.id} className="hover:bg-[#fafbff]/50 transition-colors group">
-                    {currentContext?.type !== 'series' ? (
-                       <td className="px-10 py-6 w-32">
-                         <div className="w-14 h-20 rounded-2xl overflow-hidden shadow-sm border border-slate-100 bg-slate-50">
-                           <img src={item.poster || item.thumbnail || 'https://via.placeholder.com/300x450'} className="w-full h-full object-cover" />
-                         </div>
-                       </td>
-                    ) : (
-                      <td className="px-10 py-6 w-32">
-                        <div className="w-12 h-12 rounded-xl bg-slate-100/50 border border-slate-200/50"></div>
-                      </td>
-                    )}
+                    <td className="px-10 py-6 w-32">
+                        <div className="w-14 h-20 rounded-2xl overflow-hidden shadow-sm border border-slate-100 bg-slate-50">
+                            <img src={item.poster || item.thumbnail || 'https://via.placeholder.com/300x450'} className="w-full h-full object-cover" />
+                        </div>
+                    </td>
                     
                     <td className="px-10 py-6">
                       <div className="font-extrabold text-[#1e293b] text-lg tracking-tight">{item.title || item.name || `Episodio ${item.episodeNumber}`}</div>
@@ -751,7 +746,6 @@ const App = () => {
       {isModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-6 bg-[#0f172a]/80 backdrop-blur-xl animate-fade-in">
           <div className="bg-white w-full max-w-7xl max-h-[94vh] rounded-[4rem] shadow-[0_40px_100px_rgba(0,0,0,0.5)] overflow-hidden flex border border-white/20">
-            {/* Sidebar Preview */}
             <div className="w-80 bg-[#f8fafc] border-r border-slate-100 flex flex-col p-10 items-center overflow-y-auto">
                <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-8">Vista Previa</h4>
                <div className="w-full aspect-[3/4] rounded-[2.5rem] bg-white shadow-2xl overflow-hidden flex items-center justify-center relative border border-slate-200/50">
@@ -763,11 +757,10 @@ const App = () => {
                </div>
             </div>
 
-            {/* Form Content */}
             <div className="flex-1 flex flex-col overflow-hidden bg-white">
               <header className="px-12 py-10 border-b border-slate-50 flex items-center justify-between">
                 <div>
-                  <h3 className="text-3xl font-black text-slate-900 tracking-tighter">{editItem ? 'Editando' : 'Añadir Nuevo'} {currentContext?.type || (view === 'Movies' ? 'Película' : 'Serie')}</h3>
+                  <h3 className="text-3xl font-black text-slate-900 tracking-tighter">{editItem ? 'Editando' : 'Añadir Nuevo'} {currentContext?.type === 'series' ? 'Temporada' : currentContext?.type === 'season' ? 'Episodio' : (view === 'Movies' ? 'Película' : 'Serie')}</h3>
                   <div className="mt-1"><Badge color="indigo">{currentContext?.type ? currentContext.type.toUpperCase() : 'ROOT'}</Badge></div>
                 </div>
                 <button onClick={() => setIsModalOpen(false)} className="w-14 h-14 flex items-center justify-center bg-slate-50 rounded-full text-slate-400 hover:text-slate-900 transition-all hover:rotate-90">&times;</button>
@@ -775,7 +768,6 @@ const App = () => {
 
               <form onSubmit={handleAddEdit} className="flex-1 overflow-y-auto p-12 space-y-12 custom-scrollbar">
                 
-                {/* --- EDITOR DE PELÍCULAS --- */}
                 {view === 'Movies' && !currentContext && (
                   <div className="space-y-12">
                     {!editItem && (
@@ -817,7 +809,6 @@ const App = () => {
                   </div>
                 )}
 
-                {/* --- EDITOR DE SERIES --- */}
                 {view === 'Series' && !currentContext && (
                   <div className="space-y-12">
                     {!editItem && (
@@ -864,7 +855,6 @@ const App = () => {
                   </div>
                 )}
 
-                {/* --- EDITOR DE TEMPORADAS --- */}
                 {currentContext?.type === 'series' && (
                   <div className="space-y-12">
                     {editItem && (
@@ -886,14 +876,13 @@ const App = () => {
                   </div>
                 )}
 
-                {/* --- EDITOR DE EPISODIOS --- */}
                 {currentContext?.type === 'season' && (
                   <div className="space-y-12">
                     {editItem && (
                       <div className="flex justify-end">
                         <button type="button" onClick={updateEpisodeFromTmdb} disabled={isUpdatingFromTmdb} className="px-8 py-4 bg-indigo-600 text-white rounded-3xl font-black text-xs uppercase tracking-widest flex items-center space-x-3 active:scale-95 shadow-xl shadow-indigo-100 disabled:opacity-50">
                           {isUpdatingFromTmdb ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} />}
-                          <span>Actualizar desde TMDB</span>
+                          <span>Autorrellenar desde TMDB</span>
                         </button>
                       </div>
                     )}
@@ -909,7 +898,6 @@ const App = () => {
                   </div>
                 )}
 
-                {/* --- EDITOR DE SERVIDORES (VIDEOS) --- */}
                 {(currentContext?.type === 'episode' || currentContext?.type === 'movie_videos') && (
                   <div className="space-y-12">
                     <div className="grid grid-cols-2 gap-8">
@@ -937,7 +925,6 @@ const App = () => {
         </div>
       )}
 
-      {/* MODAL BULK URLS */}
       {isBatchOpen && (
         <div className="fixed inset-0 z-[60] flex items-center justify-center p-6 bg-[#0f172a]/80 backdrop-blur-xl animate-fade-in">
           <div className="bg-white w-full max-w-2xl rounded-[4rem] shadow-2xl p-14 border border-white/20">
