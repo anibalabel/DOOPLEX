@@ -4,7 +4,7 @@ import {
   Film, Tv, LayoutDashboard, Plus, Search, Bell, Sparkles, Trash2, Edit3, 
   Youtube, Star, ChevronRight, Play, Layers, Settings, ArrowLeft, 
   Calendar, Clock, CheckCircle2, XCircle, MoreVertical, Copy, List, Save, Loader2,
-  ExternalLink, Info, Wand2, Eye, EyeOff, LogIn, LogOut, SearchIcon, AlertTriangle, ShieldAlert, Image as ImageIcon, Wand, Tag, Monitor, Hash
+  ExternalLink, Info, Wand2, Eye, EyeOff, LogIn, LogOut, SearchIcon, AlertTriangle, ShieldAlert, Image as ImageIcon, Wand, Tag, Monitor, Hash, Download
 } from 'lucide-react';
 import { GoogleGenAI, Type } from "@google/genai";
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
@@ -60,6 +60,7 @@ interface Series {
   id_youtube?: string;
   status: "ongoing" | "ended";
   active: boolean;
+  TMDB_id?: number;
   createdAt: number;
 }
 
@@ -106,6 +107,7 @@ const App = () => {
   const [editItem, setEditItem] = useState<any | null>(null);
   const [tmdbSearchResults, setTmdbSearchResults] = useState<any[]>([]);
   const [isSearchingTmdb, setIsSearchingTmdb] = useState(false);
+  const [isFetchingSeasons, setIsFetchingSeasons] = useState(false);
   
   const [posterPreviewUrl, setPosterPreviewUrl] = useState("");
   const [bannerPreviewUrl, setBannerPreviewUrl] = useState("");
@@ -151,7 +153,6 @@ const App = () => {
     let q;
     const seriesId = navStack.find(n => n.type === 'series')?.id;
     const seasonId = navStack.find(n => n.type === 'season')?.id;
-    const episodeId = navStack.find(n => n.type === 'episode')?.id;
 
     if (currentContext.type === 'series') q = query(collection(db, `series/${currentContext.id}/seasons`), orderBy("seasonNumber", "asc"));
     else if (currentContext.type === 'season') q = query(collection(db, `series/${seriesId}/seasons/${currentContext.id}/episodes`), orderBy("episodeNumber", "asc"));
@@ -249,6 +250,72 @@ const App = () => {
     finally { setIsSaving(false); }
   };
 
+  const fetchAllSeasonsFromTmdb = async () => {
+    const seriesId = navStack.find(n => n.type === 'series')?.id;
+    if (!seriesId) return;
+    const currentSeries = seriesList.find(s => s.id === seriesId);
+    if (!currentSeries?.TMDB_id) {
+        alert("Esta serie no tiene un TMDB_id asignado.");
+        return;
+    }
+
+    setIsFetchingSeasons(true);
+    try {
+      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+      const prompt = `Utilizando la API de TMDB para el programa de TV con ID ${currentSeries.TMDB_id}, obtén todas las temporadas (Season Number, Name, Year). 
+      Excluye la temporada 0 si es de especiales. Devuelve solo un array JSON de objetos con seasonNumber, name, year.`;
+      
+      const response = await ai.models.generateContent({
+        model: 'gemini-3-flash-preview',
+        contents: prompt,
+        config: {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                seasonNumber: { type: Type.NUMBER },
+                name: { type: Type.STRING },
+                year: { type: Type.NUMBER }
+              },
+              required: ["seasonNumber", "name"]
+            }
+          }
+        }
+      });
+
+      const seasons = JSON.parse(response.text || "[]");
+      if (seasons.length === 0) {
+        alert("No se encontraron temporadas.");
+        return;
+      }
+
+      if (confirm(`Se han encontrado ${seasons.length} temporadas. ¿Deseas importarlas todas?`)) {
+        const batch = writeBatch(db);
+        const seasonsColRef = collection(db, `series/${seriesId}/seasons`);
+        
+        seasons.forEach((s: any) => {
+            const seasonDocRef = doc(seasonsColRef);
+            batch.set(seasonDocRef, {
+                seasonNumber: s.seasonNumber,
+                name: s.name,
+                year: s.year || currentSeries.year || 0,
+                active: true,
+                createdAt: Date.now()
+            });
+        });
+
+        await batch.commit();
+        alert("Temporadas importadas con éxito.");
+      }
+    } catch (e) {
+      alert("Error al obtener temporadas.");
+    } finally {
+      setIsFetchingSeasons(false);
+    }
+  };
+
   const searchTmdb = async () => {
     const queryStr = (document.getElementById('tmdb-query') as HTMLInputElement)?.value;
     if (!queryStr) return;
@@ -328,8 +395,8 @@ const App = () => {
             <h1 className="text-3xl font-black text-slate-800 tracking-tighter uppercase italic">Cine<span className="text-indigo-600">Panel</span></h1>
           </div>
           <form onSubmit={handleLogin} className="space-y-6">
-            <input name="email" type="email" required placeholder="Admin Email" className="w-full px-6 py-4 bg-slate-50 border-none rounded-2xl outline-none font-bold" />
-            <input name="password" type="password" required placeholder="Contraseña" className="w-full px-6 py-4 bg-slate-50 border-none rounded-2xl outline-none font-bold" />
+            <input name="email" type="email" required placeholder="Admin Email" className="w-full px-6 py-4 bg-slate-50 border-none rounded-2xl outline-none font-bold shadow-inner focus:ring-2 focus:ring-indigo-100 transition-all" />
+            <input name="password" type="password" required placeholder="Contraseña" className="w-full px-6 py-4 bg-slate-50 border-none rounded-2xl outline-none font-bold shadow-inner focus:ring-2 focus:ring-indigo-100 transition-all" />
             {authError && <p className="text-rose-500 text-[10px] font-black text-center uppercase tracking-widest">{authError}</p>}
             <button type="submit" className="w-full py-5 bg-indigo-600 text-white rounded-[1.5rem] font-black uppercase tracking-widest shadow-xl flex items-center justify-center space-x-3 transition-all active:scale-95">
               <LogIn size={20} /> <span>Ingresar</span>
@@ -373,10 +440,23 @@ const App = () => {
             )}
           </div>
           <div className="flex items-center space-x-4">
-            <input type="text" placeholder="Filtrar por nombre..." className="px-6 py-3 bg-white border border-slate-100 rounded-2xl text-sm outline-none w-72 shadow-sm" value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} />
-            <button onClick={() => openModal()} className="bg-indigo-600 text-white px-6 py-3 rounded-2xl font-bold text-sm flex items-center space-x-2 shadow-lg shadow-indigo-100"><Plus size={18} /> <span>Añadir</span></button>
+            <input type="text" placeholder="Filtrar por nombre..." className="px-6 py-3 bg-white border border-slate-100 rounded-2xl text-sm outline-none w-72 shadow-sm focus:ring-2 focus:ring-indigo-100 transition-all" value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} />
+            
+            {currentContext?.type === 'series' && (
+              <button 
+                onClick={fetchAllSeasonsFromTmdb} 
+                disabled={isFetchingSeasons}
+                className="bg-slate-900 text-white px-6 py-3 rounded-2xl font-bold text-sm flex items-center space-x-2 shadow-lg hover:bg-slate-800 transition-all active:scale-95 disabled:opacity-50"
+              >
+                {isFetchingSeasons ? <Loader2 size={18} className="animate-spin" /> : <Download size={18} />}
+                <span>Fetch All Seasons</span>
+              </button>
+            )}
+
+            <button onClick={() => openModal()} className="bg-indigo-600 text-white px-6 py-3 rounded-2xl font-bold text-sm flex items-center space-x-2 shadow-lg shadow-indigo-100 transition-all hover:bg-indigo-700 active:scale-95"><Plus size={18} /> <span>Añadir</span></button>
+            
             {currentContext?.type === 'season' && (
-              <button onClick={() => setIsBatchOpen(true)} className="bg-slate-900 text-white px-6 py-3 rounded-2xl font-bold text-sm flex items-center space-x-2"><List size={18} /> <span>Bulk URLs</span></button>
+              <button onClick={() => setIsBatchOpen(true)} className="bg-slate-900 text-white px-6 py-3 rounded-2xl font-bold text-sm flex items-center space-x-2 shadow-lg hover:bg-slate-800 transition-all active:scale-95"><List size={18} /> <span>Bulk URLs</span></button>
             )}
           </div>
         </header>
@@ -402,6 +482,7 @@ const App = () => {
                       <div className="flex items-center space-x-2 mt-1">
                         <span className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">{item.year || item.server || (item.episodeNumber ? `Epi ${item.episodeNumber}` : 'N/A')}</span>
                         {item.status && <Badge color={item.status === 'ongoing' ? 'emerald' : 'slate'}>{item.status}</Badge>}
+                        {item.TMDB_id && <Badge color="indigo">TMDB: {item.TMDB_id}</Badge>}
                       </div>
                     </td>
                     <td className="px-8 py-4 text-center"><Toggle active={item.active} onToggle={() => toggleActive(item.id, item.active)} /></td>
@@ -432,6 +513,7 @@ const App = () => {
                <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-6">Vista Previa Visual</h4>
                <div className="w-full aspect-[3/4] rounded-[2rem] bg-white shadow-xl overflow-hidden flex items-center justify-center relative border border-slate-200">
                   {posterPreviewUrl ? <img src={posterPreviewUrl} className="w-full h-full object-cover" /> : <ImageIcon size={48} className="text-slate-200" />}
+                  {isGeneratingPoster && <div className="absolute inset-0 bg-indigo-600/20 backdrop-blur-md flex items-center justify-center"><Loader2 className="animate-spin text-white" size={32} /></div>}
                </div>
                <div className="w-full aspect-[16/9] mt-8 rounded-2xl bg-white shadow-lg overflow-hidden flex items-center justify-center relative border border-slate-200">
                   {bannerPreviewUrl ? <img src={bannerPreviewUrl} className="w-full h-full object-cover" /> : <Monitor size={32} className="text-slate-200" />}
@@ -445,7 +527,7 @@ const App = () => {
                   <h3 className="text-2xl font-black text-slate-800 tracking-tighter">{editItem ? 'Editando' : 'Creando'} {currentContext?.type || view}</h3>
                   <Badge color="slate">Nivel: {currentContext?.type || 'Root'}</Badge>
                 </div>
-                <button onClick={() => setIsModalOpen(false)} className="w-10 h-10 flex items-center justify-center bg-slate-50 rounded-2xl text-slate-400 hover:text-slate-800">&times;</button>
+                <button onClick={() => setIsModalOpen(false)} className="w-10 h-10 flex items-center justify-center bg-slate-50 rounded-2xl text-slate-400 hover:text-slate-800 transition-colors">&times;</button>
               </header>
 
               <form onSubmit={handleAddEdit} className="flex-1 overflow-y-auto p-12 space-y-10 custom-scrollbar">
@@ -453,8 +535,8 @@ const App = () => {
                    <div className="p-8 bg-indigo-50/30 rounded-[2.5rem] border border-indigo-100">
                      <label className="text-[10px] font-black text-indigo-400 uppercase tracking-widest mb-4 block">Asistente TMDB</label>
                      <div className="flex space-x-2">
-                       <input id="tmdb-query" placeholder="Buscar título original..." className="flex-1 px-6 py-4 bg-white border-none rounded-2xl outline-none font-bold shadow-sm" />
-                       <button type="button" onClick={searchTmdb} disabled={isSearchingTmdb} className="px-8 bg-indigo-600 text-white rounded-2xl font-black text-xs uppercase tracking-widest flex items-center space-x-2">
+                       <input id="tmdb-query" placeholder="Buscar título original..." className="flex-1 px-6 py-4 bg-white border-none rounded-2xl outline-none font-bold shadow-sm focus:ring-2 focus:ring-indigo-100 transition-all" />
+                       <button type="button" onClick={searchTmdb} disabled={isSearchingTmdb} className="px-8 bg-indigo-600 text-white rounded-2xl font-black text-xs uppercase tracking-widest flex items-center space-x-2 active:scale-95 shadow-lg shadow-indigo-100">
                          {isSearchingTmdb ? <Loader2 className="animate-spin" size={16} /> : <SearchIcon size={16} />}
                          <span>Consultar</span>
                        </button>
@@ -462,8 +544,8 @@ const App = () => {
                      {tmdbSearchResults.length > 0 && (
                        <div className="grid grid-cols-3 gap-4 mt-6">
                          {tmdbSearchResults.map((res, i) => (
-                           <div key={i} onClick={() => selectTmdbResult(res)} className="p-3 bg-white rounded-2xl shadow-sm hover:shadow-md cursor-pointer border border-indigo-50 transition-all flex items-center space-x-3 group">
-                             <img src={res.poster} className="w-10 h-14 object-cover rounded-lg" />
+                           <div key={i} onClick={() => selectTmdbResult(res)} className="p-3 bg-white rounded-2xl shadow-sm hover:shadow-md cursor-pointer border border-indigo-50 transition-all flex items-center space-x-3 group active:scale-95">
+                             <img src={res.poster} className="w-10 h-14 object-cover rounded-lg shadow-sm" />
                              <div className="flex-1 min-w-0"><h5 className="font-bold text-slate-800 text-[10px] truncate">{res.title}</h5><p className="text-[8px] text-slate-400 font-bold uppercase">{res.year}</p></div>
                            </div>
                          ))}
@@ -477,10 +559,9 @@ const App = () => {
                   <div className="grid grid-cols-2 gap-6">
                     <div className="col-span-full">
                       <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 px-1">Nombre / Título</label>
-                      <input name="title" required defaultValue={editItem?.title || editItem?.name} className="w-full px-6 py-4 bg-slate-50 border-none rounded-2xl outline-none font-bold" />
+                      <input name="title" required defaultValue={editItem?.title || editItem?.name} className="w-full px-6 py-4 bg-slate-50 border-none rounded-2xl outline-none font-bold focus:bg-slate-100 transition-colors" />
                     </div>
 
-                    {/* Mostrar campos según el contexto */}
                     {(!currentContext || currentContext.type === 'series' || currentContext.type === 'season') && (
                       <>
                         <div><label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 px-1">Título Original</label><input name="title_original" defaultValue={editItem?.title_original} className="w-full px-6 py-4 bg-slate-50 border-none rounded-2xl outline-none font-bold" /></div>
@@ -488,6 +569,7 @@ const App = () => {
                           <div><label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 px-1">Año</label><input name="year" type="number" defaultValue={editItem?.year} className="w-full px-6 py-4 bg-slate-50 border-none rounded-2xl outline-none font-bold" /></div>
                           <div><label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 px-1">Rating</label><input name="rating" type="number" step="0.1" defaultValue={editItem?.rating} className="w-full px-6 py-4 bg-slate-50 border-none rounded-2xl outline-none font-bold" /></div>
                         </div>
+                        <div className="col-span-full"><label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 px-1">TMDB ID</label><input name="TMDB_id" type="number" defaultValue={editItem?.TMDB_id} className="w-full px-6 py-4 bg-slate-50 border-none rounded-2xl outline-none font-bold" placeholder="ID numérico de TMDB" /></div>
                       </>
                     )}
 
@@ -514,7 +596,6 @@ const App = () => {
                   </div>
                 </div>
 
-                {/* Sección Multimedia */}
                 {(!currentContext || currentContext.type === 'season') && (
                   <div className="space-y-6">
                     <h5 className="text-xs font-black text-slate-800 uppercase tracking-wider pl-4 border-l-4 border-indigo-500">Recursos Visuales</h5>
@@ -535,7 +616,6 @@ const App = () => {
                   </div>
                 )}
 
-                {/* Sección Videos/Servidores */}
                 {(currentContext?.type === 'episode' || currentContext?.type === 'movie_videos') && (
                   <div className="space-y-6">
                     <h5 className="text-xs font-black text-slate-800 uppercase tracking-wider pl-4 border-l-4 border-indigo-500">Configuración de Video</h5>
@@ -553,12 +633,12 @@ const App = () => {
 
                 <div className="col-span-full">
                   <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 px-1">Descripción / Overview</label>
-                  <textarea name={currentContext?.type === 'season' ? 'overview' : 'description'} defaultValue={editItem?.description || editItem?.overview} className="w-full h-32 px-6 py-4 bg-slate-50 border-none rounded-3xl outline-none font-medium text-slate-600 resize-none leading-relaxed" />
+                  <textarea name={currentContext?.type === 'season' ? 'overview' : 'description'} defaultValue={editItem?.description || editItem?.overview} className="w-full h-32 px-6 py-4 bg-slate-50 border-none rounded-3xl outline-none font-medium text-slate-600 resize-none leading-relaxed focus:bg-slate-100 transition-colors" />
                 </div>
 
                 <footer className="pt-8 flex justify-end space-x-4 border-t border-slate-50">
                   <button type="button" onClick={() => setIsModalOpen(false)} className="px-8 py-4 text-slate-400 font-black text-[10px] uppercase tracking-widest">Cancelar</button>
-                  <button type="submit" disabled={isSaving} className="px-12 py-4 bg-indigo-600 text-white rounded-2xl font-black text-xs uppercase tracking-widest shadow-xl flex items-center space-x-2 shadow-indigo-100 transition-all active:scale-95">
+                  <button type="submit" disabled={isSaving} className="px-12 py-4 bg-indigo-600 text-white rounded-2xl font-black text-xs uppercase tracking-widest shadow-xl flex items-center space-x-2 shadow-indigo-100 transition-all active:scale-95 hover:bg-indigo-700">
                     {isSaving ? <Loader2 className="animate-spin" /> : <Save size={18} />}
                     <span>Guardar Registro</span>
                   </button>
@@ -577,13 +657,13 @@ const App = () => {
             <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-8">Pega una URL por línea para asignar a episodios secuenciales</p>
             <form onSubmit={handleBatchProcess} className="space-y-6">
               <div className="grid grid-cols-2 gap-4">
-                <input name="startEp" type="number" defaultValue={1} className="px-6 py-4 bg-slate-50 rounded-2xl outline-none font-bold" placeholder="Epi. Inicial" />
-                <input name="server" defaultValue="Streamtape" className="px-6 py-4 bg-slate-50 rounded-2xl outline-none font-bold" placeholder="Servidor" />
+                <input name="startEp" type="number" defaultValue={1} className="px-6 py-4 bg-slate-50 rounded-2xl outline-none font-bold shadow-inner" placeholder="Epi. Inicial" />
+                <input name="server" defaultValue="Streamtape" className="px-6 py-4 bg-slate-50 rounded-2xl outline-none font-bold shadow-inner" placeholder="Servidor" />
               </div>
-              <textarea name="urls" required className="w-full h-40 px-6 py-4 bg-slate-50 border-none rounded-3xl outline-none font-medium text-[10px] resize-none" placeholder="URLs..." />
+              <textarea name="urls" required className="w-full h-40 px-6 py-4 bg-slate-50 border-none rounded-3xl outline-none font-medium text-[10px] resize-none shadow-inner" placeholder="Pega aquí las URLs..." />
               <div className="flex space-x-4">
                 <button type="button" onClick={() => setIsBatchOpen(false)} className="flex-1 py-4 bg-slate-100 text-slate-400 rounded-2xl font-black text-xs uppercase tracking-widest">Cerrar</button>
-                <button type="submit" disabled={isSaving} className="flex-1 py-4 bg-indigo-600 text-white rounded-2xl font-black text-xs uppercase tracking-widest shadow-xl flex items-center justify-center space-x-2 active:scale-95">
+                <button type="submit" disabled={isSaving} className="flex-1 py-4 bg-indigo-600 text-white rounded-2xl font-black text-xs uppercase tracking-widest shadow-xl flex items-center justify-center space-x-2 active:scale-95 shadow-indigo-100">
                    {isSaving ? <Loader2 className="animate-spin" /> : <Plus size={16} />}
                    <span>Procesar Lote</span>
                 </button>
