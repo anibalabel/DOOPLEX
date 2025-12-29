@@ -4,7 +4,7 @@ import {
   Film, Tv, LayoutDashboard, Plus, Search, Bell, Sparkles, Trash2, Edit3, 
   Youtube, Star, ChevronRight, Play, Layers, Settings, ArrowLeft, 
   Calendar, Clock, CheckCircle2, XCircle, MoreVertical, Copy, List, Save, Loader2,
-  ExternalLink, Info, Wand2, Eye, EyeOff, LogIn, LogOut, SearchIcon, AlertTriangle, ShieldAlert, Image as ImageIcon, Wand, Tag, Monitor, Hash, Download
+  ExternalLink, Info, Wand2, Eye, EyeOff, LogIn, LogOut, SearchIcon, AlertTriangle, ShieldAlert, Image as ImageIcon, Wand, Tag, Monitor, Hash, Download, RefreshCw
 } from 'lucide-react';
 import { GoogleGenAI, Type } from "@google/genai";
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
@@ -66,7 +66,7 @@ interface Series {
 
 // --- Componentes UI ---
 
-const Badge = ({ children, color = "indigo" }: { children: React.ReactNode, color?: string }) => {
+const Badge = ({ children, color = "indigo" }: { children?: React.ReactNode, color?: string }) => {
   const styles: Record<string, string> = {
     indigo: "bg-indigo-50 text-indigo-600 border-indigo-100",
     emerald: "bg-emerald-50 text-emerald-600 border-emerald-100",
@@ -109,6 +109,7 @@ const App = () => {
   const [isSearchingTmdb, setIsSearchingTmdb] = useState(false);
   const [isFetchingSeasons, setIsFetchingSeasons] = useState(false);
   const [isFetchingEpisodes, setIsFetchingEpisodes] = useState(false);
+  const [isUpdatingFromTmdb, setIsUpdatingFromTmdb] = useState(false);
   
   const [posterPreviewUrl, setPosterPreviewUrl] = useState("");
   const [bannerPreviewUrl, setBannerPreviewUrl] = useState("");
@@ -193,7 +194,10 @@ const App = () => {
     try {
       const path = getFirestorePath();
       await deleteDoc(doc(db, path, id));
-    } catch (e) { alert("Error al eliminar."); }
+    } catch (e) { 
+      console.error("Delete error:", e);
+      alert("Error al eliminar."); 
+    }
   };
 
   const handleAddEdit = async (e: React.FormEvent) => {
@@ -222,33 +226,114 @@ const App = () => {
     finally { setIsSaving(false); }
   };
 
-  const handleBatchProcess = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setIsSaving(true);
-    const fd = new FormData(e.target as HTMLFormElement);
-    const startEp = Number(fd.get('startEp'));
-    const server = fd.get('server') as string;
-    const language = fd.get('language') as string;
-    const quality = fd.get('quality') as string;
-    const urls = (fd.get('urls') as string).split('\n').map(u => u.trim()).filter(u => u !== '');
-    
+  const updateSeasonFromTmdb = async () => {
+    if (!editItem) return;
+    const seriesId = navStack.find(n => n.type === 'series')?.id;
+    const currentSeries = seriesList.find(s => s.id === seriesId);
+    if (!currentSeries?.TMDB_id) {
+      alert("La serie padre no tiene TMDB_id.");
+      return;
+    }
+
+    setIsUpdatingFromTmdb(true);
+    try {
+      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+      const prompt = `Utilizando la API de TMDB para el programa de TV con ID ${currentSeries.TMDB_id}, obtén los metadatos de la temporada ${editItem.seasonNumber}.
+      Para la imagen del banner, utiliza el campo 'backdrop_path' y conviértelo en una URL completa con el formato 'https://image.tmdb.org/t/p/original/PATH'.
+      Devuelve solo un objeto JSON con: name, year, banner (URL completa de backdrop_path).`;
+      
+      const response = await ai.models.generateContent({
+        model: 'gemini-3-flash-preview',
+        contents: prompt,
+        config: {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              name: { type: Type.STRING },
+              year: { type: Type.NUMBER },
+              banner: { type: Type.STRING }
+            }
+          }
+        }
+      });
+
+      const data = JSON.parse(response.text || "{}");
+      if (data.name) {
+        const setVal = (name: string, val: any) => {
+          const el = document.getElementsByName(name)[0] as HTMLInputElement | HTMLTextAreaElement;
+          if (el) el.value = val;
+        };
+        setVal('name', data.name);
+        setVal('year', data.year || editItem.year);
+        setVal('banner', data.banner || "");
+        setBannerPreviewUrl(data.banner || "");
+        alert("Metadatos de temporada actualizados desde TMDB.");
+      }
+    } catch (e) {
+      alert("Error al actualizar temporada desde TMDB.");
+    } finally {
+      setIsUpdatingFromTmdb(false);
+    }
+  };
+
+  const updateEpisodeFromTmdb = async () => {
+    if (!editItem) return;
     const seriesId = navStack.find(n => n.type === 'series')?.id;
     const seasonId = navStack.find(n => n.type === 'season')?.id;
+    const currentSeries = seriesList.find(s => s.id === seriesId);
+    
+    if (!currentSeries?.TMDB_id) {
+      alert("La serie padre no tiene TMDB_id.");
+      return;
+    }
 
+    setIsUpdatingFromTmdb(true);
     try {
-      const batch = writeBatch(db);
-      for (let i = 0; i < urls.length; i++) {
-        const epNum = startEp + i;
-        const targetEp = items.find(item => item.episodeNumber === epNum);
-        if (targetEp) {
-          const videoRef = doc(collection(db, `series/${seriesId}/seasons/${seasonId}/episodes/${targetEp.id}/videos_serie`));
-          batch.set(videoRef, { url: urls[i], server, language, quality, format: 'embed', createdAt: Date.now(), active: true });
+      const seasonDoc = await getDoc(doc(db, `series/${seriesId}/seasons`, seasonId!));
+      const seasonData = seasonDoc.data();
+      const seasonNumber = seasonData?.seasonNumber;
+
+      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+      const prompt = `Utilizando la API de TMDB para el programa de TV con ID ${currentSeries.TMDB_id}, obtén los metadatos del episodio ${editItem.episodeNumber} de la temporada ${seasonNumber}.
+      Para la miniatura, utiliza el campo 'still_path' y conviértelo en una URL completa con el formato 'https://image.tmdb.org/t/p/original/PATH'.
+      Devuelve solo un objeto JSON con: title, overview, duration (en minutos), thumbnail (URL completa de still_path).`;
+      
+      const response = await ai.models.generateContent({
+        model: 'gemini-3-flash-preview',
+        contents: prompt,
+        config: {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              title: { type: Type.STRING },
+              overview: { type: Type.STRING },
+              duration: { type: Type.NUMBER },
+              thumbnail: { type: Type.STRING }
+            }
+          }
         }
+      });
+
+      const data = JSON.parse(response.text || "{}");
+      if (data.title) {
+        const setVal = (name: string, val: any) => {
+          const el = document.getElementsByName(name)[0] as HTMLInputElement | HTMLTextAreaElement;
+          if (el) el.value = val;
+        };
+        setVal('title', data.title);
+        setVal('duration', data.duration || editItem.duration || 0);
+        setVal('thumbnail', data.thumbnail || "");
+        setVal('overview', data.overview || "");
+        setPosterPreviewUrl(data.thumbnail || "");
+        alert("Metadatos del episodio actualizados desde TMDB.");
       }
-      await batch.commit();
-      setIsBatchOpen(false);
-    } catch (err) { alert("Error en proceso masivo."); }
-    finally { setIsSaving(false); }
+    } catch (e) {
+      alert("Error al actualizar episodio desde TMDB.");
+    } finally {
+      setIsUpdatingFromTmdb(false);
+    }
   };
 
   const fetchEpisodesFromTmdb = async () => {
@@ -264,7 +349,6 @@ const App = () => {
 
     setIsFetchingEpisodes(true);
     try {
-      // Obtenemos el seasonNumber desde Firestore para estar seguros
       const seasonDoc = await getDoc(doc(db, `series/${seriesId}/seasons`, seasonId));
       if (!seasonDoc.exists()) {
           alert("No se encontró la temporada en la base de datos.");
@@ -274,8 +358,10 @@ const App = () => {
       const seasonNumber = seasonData.seasonNumber;
 
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-      const prompt = `Utilizando la API de TMDB para el programa de TV con ID ${currentSeries.TMDB_id}, obtén todos los episodios de la temporada ${seasonNumber}. 
-      Devuelve solo un array JSON de objetos con: episodeNumber, title, overview, duration (en minutos), thumbnail (URL de la imagen del episodio).`;
+      const prompt = `Utilizando la API de TMDB para el programa de TV con ID ${currentSeries.TMDB_id}, obtén TODOS los episodios de la temporada ${seasonNumber}. 
+      Para la miniatura de cada episodio, utiliza obligatoriamente el campo 'still_path' de TMDB y conviértelo en una URL completa con el formato 'https://image.tmdb.org/t/p/original/PATH'. 
+      Si no tiene imagen, deja el campo vacío.
+      Devuelve solo un array JSON de objetos con: episodeNumber, title, overview, duration (en minutos), thumbnail (URL completa de la imagen del episodio).`;
       
       const response = await ai.models.generateContent({
         model: 'gemini-3-flash-preview',
@@ -293,7 +379,7 @@ const App = () => {
                 duration: { type: Type.NUMBER },
                 thumbnail: { type: Type.STRING }
               },
-              required: ["episodeNumber", "title"]
+              required: ["episodeNumber", "title", "thumbnail"]
             }
           }
         }
@@ -326,6 +412,7 @@ const App = () => {
         alert("Episodios importados con éxito.");
       }
     } catch (e) {
+      console.error("Fetch episodes error:", e);
       alert("Error al obtener episodios.");
     } finally {
       setIsFetchingEpisodes(false);
@@ -344,8 +431,9 @@ const App = () => {
     setIsFetchingSeasons(true);
     try {
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-      const prompt = `Utilizando la API de TMDB para el programa de TV con ID ${currentSeries.TMDB_id}, obtén todas las temporadas (Season Number, Name, Year). 
-      Excluye la temporada 0 si es de especiales. Devuelve solo un array JSON de objetos con seasonNumber, name, year.`;
+      const prompt = `Utilizando la API de TMDB para el programa de TV con ID ${currentSeries.TMDB_id}, obtén todas las temporadas (Season Number, Name, Year, Banner). 
+      Para la imagen del banner, utiliza el campo 'backdrop_path' de la temporada y conviértelo en una URL completa con el formato 'https://image.tmdb.org/t/p/original/PATH'.
+      Excluye la temporada 0 si es de especiales. Devuelve solo un array JSON de objetos con seasonNumber, name, year, banner.`;
       
       const response = await ai.models.generateContent({
         model: 'gemini-3-flash-preview',
@@ -359,9 +447,10 @@ const App = () => {
               properties: {
                 seasonNumber: { type: Type.NUMBER },
                 name: { type: Type.STRING },
-                year: { type: Type.NUMBER }
+                year: { type: Type.NUMBER },
+                banner: { type: Type.STRING }
               },
-              required: ["seasonNumber", "name"]
+              required: ["seasonNumber", "name", "banner"]
             }
           }
         }
@@ -383,6 +472,7 @@ const App = () => {
                 seasonNumber: s.seasonNumber,
                 name: s.name,
                 year: s.year || currentSeries.year || 0,
+                banner: s.banner || "",
                 active: true,
                 createdAt: Date.now()
             });
@@ -404,8 +494,9 @@ const App = () => {
     setIsSearchingTmdb(true);
     try {
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-      const prompt = `Extrae metadatos de TMDB para "${queryStr}". 
-      Formato JSON con campos: title, title_original, year, TMDB_id, poster, banner, description, rating, duration, genres (array), id_youtube (key del video trailer), status (ongoing o ended para series).`;
+      const prompt = `Extrae metadatos detallados de TMDB para "${queryStr}". 
+      Para las imágenes, utiliza obligatoriamente los campos 'poster_path' y 'backdrop_path' de TMDB y conviértelos en URLs completas con el formato 'https://image.tmdb.org/t/p/original/PATH'. 
+      Formato JSON con campos: title, title_original, year, TMDB_id, poster (URL completa), banner (URL completa), description, rating, duration, genres (array de strings), id_youtube (key del video trailer de youtube), status (valor 'ongoing' o 'ended' para series).`;
       
       const response = await ai.models.generateContent({ 
         model: 'gemini-3-flash-preview', 
@@ -435,7 +526,7 @@ const App = () => {
         } 
       });
       setTmdbSearchResults(JSON.parse(response.text || "[]"));
-    } catch (e) { alert("Error TMDB."); }
+    } catch (e) { alert("Error al buscar en TMDB."); }
     finally { setIsSearchingTmdb(false); }
   };
 
@@ -468,19 +559,48 @@ const App = () => {
     setIsModalOpen(true);
   };
 
+  const handleBatchProcess = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setIsSaving(true);
+    const fd = new FormData(e.target as HTMLFormElement);
+    const startEp = Number(fd.get('startEp'));
+    const server = fd.get('server') as string;
+    const language = fd.get('language') as string;
+    const quality = fd.get('quality') as string;
+    const urls = (fd.get('urls') as string).split('\n').map(u => u.trim()).filter(u => u !== '');
+    
+    const seriesId = navStack.find(n => n.type === 'series')?.id;
+    const seasonId = navStack.find(n => n.type === 'season')?.id;
+
+    try {
+      const batch = writeBatch(db);
+      for (let i = 0; i < urls.length; i++) {
+        const epNum = startEp + i;
+        const targetEp = items.find(item => item.episodeNumber === epNum);
+        if (targetEp) {
+          const videoRef = doc(collection(db, `series/${seriesId}/seasons/${seasonId}/episodes/${targetEp.id}/videos_serie`));
+          batch.set(videoRef, { url: urls[i], server, language, quality, format: 'embed', createdAt: Date.now(), active: true });
+        }
+      }
+      await batch.commit();
+      setIsBatchOpen(false);
+    } catch (err) { alert("Error en proceso masivo."); }
+    finally { setIsSaving(false); }
+  };
+
   if (!isAuthenticated) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-slate-50 p-6">
         <div className="w-full max-w-md bg-white rounded-[3rem] shadow-2xl p-12 border border-slate-100">
           <div className="flex flex-col items-center mb-10">
-            <div className="w-16 h-16 bg-indigo-600 rounded-3xl flex items-center justify-center text-white shadow-xl mb-6"><Play fill="currentColor" size={32} /></div>
-            <h1 className="text-3xl font-black text-slate-800 tracking-tighter uppercase italic">Cine<span className="text-indigo-600">Panel</span></h1>
+            <div className="w-16 h-16 bg-[#4f46e5] rounded-3xl flex items-center justify-center text-white shadow-xl mb-6"><Play fill="currentColor" size={32} /></div>
+            <h1 className="text-3xl font-black text-slate-800 tracking-tighter uppercase italic">Cine<span className="text-[#4f46e5]">Panel</span></h1>
           </div>
           <form onSubmit={handleLogin} className="space-y-6">
             <input name="email" type="email" required placeholder="Admin Email" className="w-full px-6 py-4 bg-slate-50 border-none rounded-2xl outline-none font-bold shadow-inner focus:ring-2 focus:ring-indigo-100 transition-all" />
             <input name="password" type="password" required placeholder="Contraseña" className="w-full px-6 py-4 bg-slate-50 border-none rounded-2xl outline-none font-bold shadow-inner focus:ring-2 focus:ring-indigo-100 transition-all" />
             {authError && <p className="text-rose-500 text-[10px] font-black text-center uppercase tracking-widest">{authError}</p>}
-            <button type="submit" className="w-full py-5 bg-indigo-600 text-white rounded-[1.5rem] font-black uppercase tracking-widest shadow-xl flex items-center justify-center space-x-3 transition-all active:scale-95">
+            <button type="submit" className="w-full py-5 bg-[#4f46e5] text-white rounded-[1.5rem] font-black uppercase tracking-widest shadow-xl flex items-center justify-center space-x-3 transition-all active:scale-95">
               <LogIn size={20} /> <span>Ingresar</span>
             </button>
           </form>
@@ -491,46 +611,59 @@ const App = () => {
 
   return (
     <div className="flex min-h-screen bg-[#FDFDFF] font-inter">
-      <aside className="w-64 bg-white border-r border-slate-100 p-6 flex flex-col space-y-8 sticky top-0 h-screen z-40">
+      {/* Sidebar Redesign matching screenshot */}
+      <aside className="w-64 bg-white border-r border-slate-100 p-6 flex flex-col space-y-12 sticky top-0 h-screen z-40">
         <div className="flex items-center space-x-3 px-2">
-          <div className="w-10 h-10 bg-indigo-600 rounded-2xl flex items-center justify-center text-white shadow-xl rotate-3"><Play fill="currentColor" size={20} /></div>
-          <h1 className="text-xl font-black tracking-tighter text-slate-800 italic uppercase">Cine<span className="text-indigo-600">Panel</span></h1>
+          <div className="w-12 h-12 bg-[#4f46e5] rounded-2xl flex items-center justify-center text-white shadow-xl shadow-indigo-200">
+            <Play fill="currentColor" size={24} />
+          </div>
+          <h1 className="text-2xl font-black tracking-tighter text-[#1e293b] italic uppercase">Cine<span className="text-[#4f46e5]">Panel</span></h1>
         </div>
-        <nav className="flex-1 space-y-1">
-          <button onClick={() => { setView('Dashboard'); clearNav(); }} className={`w-full flex items-center space-x-3 px-4 py-3 rounded-2xl transition-all ${view === 'Dashboard' ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-100' : 'text-slate-400 hover:bg-slate-50'}`}><LayoutDashboard size={18} /> <span className="text-sm font-bold">Resumen</span></button>
-          <button onClick={() => { setView('Movies'); clearNav(); }} className={`w-full flex items-center space-x-3 px-4 py-3 rounded-2xl transition-all ${view === 'Movies' ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-100' : 'text-slate-400 hover:bg-slate-50'}`}><Film size={18} /> <span className="text-sm font-bold">Películas</span></button>
-          <button onClick={() => { setView('Series'); clearNav(); }} className={`w-full flex items-center space-x-3 px-4 py-3 rounded-2xl transition-all ${view === 'Series' ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-100' : 'text-slate-400 hover:bg-slate-50'}`}><Tv size={18} /> <span className="text-sm font-bold">Series</span></button>
+        
+        <nav className="flex-1 space-y-4">
+          <button onClick={() => { setView('Dashboard'); clearNav(); }} className={`w-full flex items-center space-x-4 px-5 py-4 rounded-2xl transition-all duration-300 font-bold text-sm ${view === 'Dashboard' ? 'bg-[#4f46e5] text-white shadow-[0_10px_30px_rgba(79,70,229,0.3)] border-2 border-indigo-400' : 'text-slate-400 hover:text-slate-600'}`}>
+            <LayoutDashboard size={20} /> <span className="tracking-tight">Resumen</span>
+          </button>
+          <button onClick={() => { setView('Movies'); clearNav(); }} className={`w-full flex items-center space-x-4 px-5 py-4 rounded-2xl transition-all duration-300 font-bold text-sm ${view === 'Movies' ? 'bg-[#4f46e5] text-white shadow-[0_10px_30px_rgba(79,70,229,0.3)] border-2 border-indigo-400' : 'text-slate-400 hover:text-slate-600'}`}>
+            <Film size={20} /> <span className="tracking-tight">Películas</span>
+          </button>
+          <button onClick={() => { setView('Series'); clearNav(); }} className={`w-full flex items-center space-x-4 px-5 py-4 rounded-2xl transition-all duration-300 font-bold text-sm ${view === 'Series' ? 'bg-[#4f46e5] text-white shadow-[0_10px_30px_rgba(79,70,229,0.3)] border-2 border-indigo-400' : 'text-slate-400 hover:text-slate-600'}`}>
+            <Tv size={20} /> <span className="tracking-tight">Series</span>
+          </button>
         </nav>
-        <button onClick={() => setIsAuthenticated(false)} className="w-full flex items-center space-x-3 px-4 py-3 rounded-2xl text-rose-400 hover:bg-rose-50 font-bold text-sm"><LogOut size={18} /> <span>Salir</span></button>
+        
+        <button onClick={() => setIsAuthenticated(false)} className="w-full flex items-center space-x-4 px-5 py-4 rounded-2xl text-[#f87171] hover:bg-rose-50 font-bold text-sm transition-colors">
+          <LogOut size={20} /> <span>Salir</span>
+        </button>
       </aside>
 
-      <main className="flex-1 p-10 overflow-y-auto relative">
-        <header className="flex items-center justify-between mb-10">
+      <main className="flex-1 p-12 overflow-y-auto relative">
+        <header className="flex items-center justify-between mb-12">
           <div>
-            <h2 className="text-3xl font-black text-slate-900 tracking-tighter">
+            <h2 className="text-[42px] font-black text-slate-900 tracking-tighter leading-tight">
               {currentContext ? currentContext.label : (view === 'Movies' ? 'Películas' : view === 'Series' ? 'Series TV' : 'Dashboard')}
             </h2>
-            {currentContext && (
+            {currentContext ? (
                <div className="flex items-center space-x-2 mt-2">
-                 {navStack.map((step, idx) => (
-                   <React.Fragment key={idx}>
-                     <button onClick={() => popNav(idx)} className="text-[10px] font-black text-indigo-400 uppercase tracking-widest hover:text-indigo-600 transition-colors">{step.label}</button>
-                     {idx < navStack.length - 1 && <ChevronRight size={12} className="text-slate-300" />}
-                   </React.Fragment>
-                 ))}
+                  <span className="text-xs font-black text-[#4f46e5] uppercase tracking-[0.1em]">{currentContext.label.toUpperCase()}</span>
                </div>
+            ) : (
+               <p className="text-xs font-black text-slate-400 uppercase tracking-[0.2em] mt-2">Administrador de Contenidos</p>
             )}
           </div>
+          
           <div className="flex items-center space-x-4">
-            <input type="text" placeholder="Filtrar por nombre..." className="px-6 py-3 bg-white border border-slate-100 rounded-2xl text-sm outline-none w-72 shadow-sm focus:ring-2 focus:ring-indigo-100 transition-all" value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} />
+            <div className="relative group">
+              <input type="text" placeholder="Filtrar por nombre..." className="px-6 py-4 bg-white border border-slate-100 rounded-3xl text-sm outline-none w-80 shadow-sm focus:ring-4 focus:ring-indigo-50 transition-all font-medium" value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} />
+            </div>
             
             {currentContext?.type === 'series' && (
               <button 
                 onClick={fetchAllSeasonsFromTmdb} 
                 disabled={isFetchingSeasons}
-                className="bg-slate-900 text-white px-6 py-3 rounded-2xl font-bold text-sm flex items-center space-x-2 shadow-lg hover:bg-slate-800 transition-all active:scale-95 disabled:opacity-50"
+                className="bg-[#10141d] text-white px-8 py-4 rounded-3xl font-black text-xs flex items-center space-x-3 shadow-2xl hover:bg-slate-800 transition-all active:scale-95 disabled:opacity-50 uppercase tracking-widest"
               >
-                {isFetchingSeasons ? <Loader2 size={18} className="animate-spin" /> : <Download size={18} />}
+                {isFetchingSeasons ? <Loader2 size={16} className="animate-spin" /> : <Download size={16} />}
                 <span>Fetch All Seasons</span>
               </button>
             )}
@@ -539,54 +672,71 @@ const App = () => {
               <button 
                 onClick={fetchEpisodesFromTmdb} 
                 disabled={isFetchingEpisodes}
-                className="bg-slate-900 text-white px-6 py-3 rounded-2xl font-bold text-sm flex items-center space-x-2 shadow-lg hover:bg-slate-800 transition-all active:scale-95 disabled:opacity-50"
+                className="bg-[#10141d] text-white px-8 py-4 rounded-3xl font-black text-xs flex items-center space-x-3 shadow-2xl hover:bg-slate-800 transition-all active:scale-95 disabled:opacity-50 uppercase tracking-widest"
               >
-                {isFetchingEpisodes ? <Loader2 size={18} className="animate-spin" /> : <Download size={18} />}
+                {isFetchingEpisodes ? <Loader2 size={16} className="animate-spin" /> : <Download size={16} />}
                 <span>Fetch Episodes</span>
               </button>
             )}
 
-            <button onClick={() => openModal()} className="bg-indigo-600 text-white px-6 py-3 rounded-2xl font-bold text-sm flex items-center space-x-2 shadow-lg shadow-indigo-100 transition-all hover:bg-indigo-700 active:scale-95"><Plus size={18} /> <span>Añadir</span></button>
-            
-            {currentContext?.type === 'season' && (
-              <button onClick={() => setIsBatchOpen(true)} className="bg-slate-900 text-white px-6 py-3 rounded-2xl font-bold text-sm flex items-center space-x-2 shadow-lg hover:bg-slate-800 transition-all active:scale-95"><List size={18} /> <span>Bulk URLs</span></button>
-            )}
+            <button onClick={() => openModal()} className="bg-gradient-to-br from-[#4f46e5] to-[#7c3aed] text-white px-8 py-4 rounded-3xl font-black text-xs flex items-center space-x-3 shadow-xl shadow-indigo-100 transition-all hover:scale-105 active:scale-95 uppercase tracking-widest">
+              <Plus size={18} /> <span>Añadir</span>
+            </button>
           </div>
         </header>
 
         {loading ? (
-          <div className="flex flex-col items-center justify-center py-20 text-slate-200"><Loader2 size={48} className="animate-spin mb-4" /><p className="font-black text-[10px] uppercase tracking-widest tracking-widest">Sincronizando yupi-e9be3...</p></div>
+          <div className="flex flex-col items-center justify-center py-40 text-slate-200"><Loader2 size={64} className="animate-spin mb-6" /><p className="font-black text-[12px] uppercase tracking-[0.3em]">Cargando recursos...</p></div>
         ) : (
-          <div className="bg-white rounded-[2.5rem] border border-slate-100 shadow-sm overflow-hidden animate-fade-in">
+          <div className="bg-white rounded-[3rem] border border-slate-100 shadow-sm overflow-hidden animate-fade-in">
             <table className="w-full text-left">
-              <thead className="bg-slate-50/50 border-b border-slate-50 text-[10px] font-black uppercase text-slate-400 tracking-[0.2em]">
-                <tr><th className="px-8 py-5">Recurso</th><th className="px-8 py-5">Info</th><th className="px-8 py-5 text-center">Estado</th><th className="px-8 py-5 text-right">Acciones</th></tr>
+              <thead className="bg-[#fcfcfd] border-b border-slate-50 text-[10px] font-black uppercase text-slate-400 tracking-[0.2em]">
+                <tr>
+                  {currentContext?.type !== 'series' && <th className="px-10 py-7">Recurso</th>}
+                  {currentContext?.type === 'series' && <th className="px-10 py-7">Recurso</th>}
+                  <th className="px-10 py-7">Info</th>
+                  <th className="px-10 py-7 text-center">Estado</th>
+                  <th className="px-10 py-7 text-right">Acciones</th>
+                </tr>
               </thead>
               <tbody className="divide-y divide-slate-50">
                 {(currentContext ? items : (view === 'Movies' ? movies : seriesList)).filter(i => (i.title || i.name || "").toLowerCase().includes(searchQuery.toLowerCase())).map(item => (
-                  <tr key={item.id} className="hover:bg-slate-50/30 transition-colors group">
-                    <td className="px-8 py-4 w-24">
-                      <div className="w-12 h-18 rounded-xl overflow-hidden shadow-md border border-slate-100 bg-slate-50">
-                        <img src={item.poster || item.thumbnail || 'https://via.placeholder.com/300x450'} className="w-full h-full object-cover" />
-                      </div>
-                    </td>
-                    <td className="px-8 py-4">
-                      <div className="font-bold text-slate-800 text-sm">{item.title || item.name || `Episodio ${item.episodeNumber}`}</div>
-                      <div className="flex items-center space-x-2 mt-1">
-                        <span className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">{item.year || item.server || (item.episodeNumber ? `Epi ${item.episodeNumber}` : 'N/A')}</span>
+                  <tr key={item.id} className="hover:bg-[#fafbff]/50 transition-colors group">
+                    {currentContext?.type !== 'series' ? (
+                       <td className="px-10 py-6 w-32">
+                         <div className="w-14 h-20 rounded-2xl overflow-hidden shadow-sm border border-slate-100 bg-slate-50">
+                           <img src={item.poster || item.thumbnail || 'https://via.placeholder.com/300x450'} className="w-full h-full object-cover" />
+                         </div>
+                       </td>
+                    ) : (
+                      <td className="px-10 py-6 w-32">
+                        <div className="w-12 h-12 rounded-xl bg-slate-100/50 border border-slate-200/50"></div>
+                      </td>
+                    )}
+                    
+                    <td className="px-10 py-6">
+                      <div className="font-extrabold text-[#1e293b] text-lg tracking-tight">{item.title || item.name || `Episodio ${item.episodeNumber}`}</div>
+                      <div className="flex items-center space-x-3 mt-1.5">
+                        <span className="text-[11px] text-slate-400 font-bold uppercase tracking-wider">{item.year || item.server || (item.episodeNumber ? `Episodio ${item.episodeNumber}` : 'N/A')}</span>
                         {item.status && <Badge color={item.status === 'ongoing' ? 'emerald' : 'slate'}>{item.status}</Badge>}
-                        {item.TMDB_id && <Badge color="indigo">TMDB: {item.TMDB_id}</Badge>}
+                        {item.TMDB_id && <Badge color="indigo">TMDB {item.TMDB_id}</Badge>}
                       </div>
                     </td>
-                    <td className="px-8 py-4 text-center"><Toggle active={item.active} onToggle={() => toggleActive(item.id, item.active)} /></td>
-                    <td className="px-8 py-4 text-right">
-                      <div className="flex items-center justify-end space-x-2 text-slate-300">
-                        {view === 'Movies' && !currentContext && <button onClick={() => handleNav('movie_videos', item.id, `Vídeos: ${item.title}`)} className="p-2 hover:bg-indigo-50 hover:text-indigo-600 rounded-xl" title="Servidores"><Layers size={18} /></button>}
-                        {view === 'Series' && !currentContext && <button onClick={() => handleNav('series', item.id, `Temp: ${item.title}`)} className="p-2 hover:bg-indigo-50 hover:text-indigo-600 rounded-xl" title="Temporadas"><List size={18} /></button>}
-                        {currentContext?.type === 'series' && <button onClick={() => handleNav('season', item.id, `S${item.seasonNumber}: ${item.name}`)} className="p-2 hover:bg-indigo-50 hover:text-indigo-600 rounded-xl" title="Episodios"><List size={18} /></button>}
-                        {currentContext?.type === 'season' && <button onClick={() => handleNav('episode', item.id, `E${item.episodeNumber}: ${item.title}`)} className="p-2 hover:bg-indigo-50 hover:text-indigo-600 rounded-xl" title="Servidores"><Layers size={18} /></button>}
-                        <button onClick={() => openModal(item)} className="p-2 hover:bg-amber-50 hover:text-amber-600 rounded-xl" title="Editar"><Edit3 size={18} /></button>
-                        <button onClick={() => handleDelete(item.id)} className="p-2 hover:bg-rose-50 hover:text-rose-600 rounded-xl" title="Eliminar"><Trash2 size={18} /></button>
+                    
+                    <td className="px-10 py-6 text-center">
+                      <div className="flex justify-center scale-110">
+                        <Toggle active={item.active} onToggle={() => toggleActive(item.id, item.active)} />
+                      </div>
+                    </td>
+                    
+                    <td className="px-10 py-6 text-right">
+                      <div className="flex items-center justify-end space-x-3">
+                        {view === 'Movies' && !currentContext && <button onClick={() => handleNav('movie_videos', item.id, item.title)} className="p-3 hover:bg-indigo-50 hover:text-indigo-600 rounded-2xl transition-all" title="Servidores"><Layers size={20} /></button>}
+                        {view === 'Series' && !currentContext && <button onClick={() => handleNav('series', item.id, item.title)} className="p-3 hover:bg-indigo-50 hover:text-indigo-600 rounded-2xl transition-all" title="Temporadas"><List size={20} /></button>}
+                        {currentContext?.type === 'series' && <button onClick={() => handleNav('season', item.id, item.name)} className="p-3 hover:bg-indigo-50 hover:text-indigo-600 rounded-2xl transition-all" title="Episodios"><List size={20} /></button>}
+                        {currentContext?.type === 'season' && <button onClick={() => handleNav('episode', item.id, item.title || `Episodio ${item.episodeNumber}`)} className="p-3 hover:bg-indigo-50 hover:text-indigo-600 rounded-2xl transition-all" title="Servidores"><Layers size={20} /></button>}
+                        <button onClick={() => openModal(item)} className="p-3 hover:bg-slate-100 hover:text-[#4f46e5] rounded-2xl transition-all" title="Editar"><Edit3 size={20} /></button>
+                        <button onClick={() => handleDelete(item.id)} className="p-3 hover:bg-rose-50 hover:text-rose-500 rounded-2xl transition-all" title="Eliminar"><Trash2 size={20} /></button>
                       </div>
                     </td>
                   </tr>
@@ -599,141 +749,186 @@ const App = () => {
 
       {/* --- MODAL EDITOR --- */}
       {isModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-6 bg-slate-900/60 backdrop-blur-md animate-fade-in">
-          <div className="bg-white w-full max-w-7xl max-h-[94vh] rounded-[3.5rem] shadow-2xl overflow-hidden flex border border-white/20">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-6 bg-[#0f172a]/80 backdrop-blur-xl animate-fade-in">
+          <div className="bg-white w-full max-w-7xl max-h-[94vh] rounded-[4rem] shadow-[0_40px_100px_rgba(0,0,0,0.5)] overflow-hidden flex border border-white/20">
             {/* Sidebar Preview */}
-            <div className="w-80 bg-slate-50 border-r border-slate-100 flex flex-col p-8 items-center overflow-y-auto">
-               <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-6">Vista Previa Visual</h4>
-               <div className="w-full aspect-[3/4] rounded-[2rem] bg-white shadow-xl overflow-hidden flex items-center justify-center relative border border-slate-200">
-                  {posterPreviewUrl ? <img src={posterPreviewUrl} className="w-full h-full object-cover" /> : <ImageIcon size={48} className="text-slate-200" />}
-                  {isGeneratingPoster && <div className="absolute inset-0 bg-indigo-600/20 backdrop-blur-md flex items-center justify-center"><Loader2 className="animate-spin text-white" size={32} /></div>}
+            <div className="w-80 bg-[#f8fafc] border-r border-slate-100 flex flex-col p-10 items-center overflow-y-auto">
+               <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-8">Vista Previa</h4>
+               <div className="w-full aspect-[3/4] rounded-[2.5rem] bg-white shadow-2xl overflow-hidden flex items-center justify-center relative border border-slate-200/50">
+                  {posterPreviewUrl ? <img src={posterPreviewUrl} className="w-full h-full object-cover" /> : <ImageIcon size={64} className="text-slate-200" />}
+                  {isGeneratingPoster && <div className="absolute inset-0 bg-indigo-600/20 backdrop-blur-md flex items-center justify-center"><Loader2 className="animate-spin text-white" size={40} /></div>}
                </div>
-               <div className="w-full aspect-[16/9] mt-8 rounded-2xl bg-white shadow-lg overflow-hidden flex items-center justify-center relative border border-slate-200">
-                  {bannerPreviewUrl ? <img src={bannerPreviewUrl} className="w-full h-full object-cover" /> : <Monitor size={32} className="text-slate-200" />}
+               <div className="w-full aspect-[16/9] mt-10 rounded-3xl bg-white shadow-xl overflow-hidden flex items-center justify-center relative border border-slate-200/50">
+                  {bannerPreviewUrl ? <img src={bannerPreviewUrl} className="w-full h-full object-cover" /> : <Monitor size={40} className="text-slate-200" />}
                </div>
             </div>
 
             {/* Form Content */}
             <div className="flex-1 flex flex-col overflow-hidden bg-white">
-              <header className="px-10 py-8 border-b border-slate-50 flex items-center justify-between">
+              <header className="px-12 py-10 border-b border-slate-50 flex items-center justify-between">
                 <div>
-                  <h3 className="text-2xl font-black text-slate-800 tracking-tighter">{editItem ? 'Editando' : 'Creando'} {currentContext?.type || view}</h3>
-                  <Badge color="slate">Nivel: {currentContext?.type || 'Root'}</Badge>
+                  <h3 className="text-3xl font-black text-slate-900 tracking-tighter">{editItem ? 'Editando' : 'Añadir Nuevo'} {currentContext?.type || (view === 'Movies' ? 'Película' : 'Serie')}</h3>
+                  <div className="mt-1"><Badge color="indigo">{currentContext?.type ? currentContext.type.toUpperCase() : 'ROOT'}</Badge></div>
                 </div>
-                <button onClick={() => setIsModalOpen(false)} className="w-10 h-10 flex items-center justify-center bg-slate-50 rounded-2xl text-slate-400 hover:text-slate-800 transition-colors">&times;</button>
+                <button onClick={() => setIsModalOpen(false)} className="w-14 h-14 flex items-center justify-center bg-slate-50 rounded-full text-slate-400 hover:text-slate-900 transition-all hover:rotate-90">&times;</button>
               </header>
 
-              <form onSubmit={handleAddEdit} className="flex-1 overflow-y-auto p-12 space-y-10 custom-scrollbar">
-                {(!currentContext || currentContext.type === 'series') && !editItem && (
-                   <div className="p-8 bg-indigo-50/30 rounded-[2.5rem] border border-indigo-100">
-                     <label className="text-[10px] font-black text-indigo-400 uppercase tracking-widest mb-4 block">Asistente TMDB</label>
-                     <div className="flex space-x-2">
-                       <input id="tmdb-query" placeholder="Buscar título original..." className="flex-1 px-6 py-4 bg-white border-none rounded-2xl outline-none font-bold shadow-sm focus:ring-2 focus:ring-indigo-100 transition-all" />
-                       <button type="button" onClick={searchTmdb} disabled={isSearchingTmdb} className="px-8 bg-indigo-600 text-white rounded-2xl font-black text-xs uppercase tracking-widest flex items-center space-x-2 active:scale-95 shadow-lg shadow-indigo-100">
-                         {isSearchingTmdb ? <Loader2 className="animate-spin" size={16} /> : <SearchIcon size={16} />}
-                         <span>Consultar</span>
-                       </button>
-                     </div>
-                     {tmdbSearchResults.length > 0 && (
-                       <div className="grid grid-cols-3 gap-4 mt-6">
-                         {tmdbSearchResults.map((res, i) => (
-                           <div key={i} onClick={() => selectTmdbResult(res)} className="p-3 bg-white rounded-2xl shadow-sm hover:shadow-md cursor-pointer border border-indigo-50 transition-all flex items-center space-x-3 group active:scale-95">
-                             <img src={res.poster} className="w-10 h-14 object-cover rounded-lg shadow-sm" />
-                             <div className="flex-1 min-w-0"><h5 className="font-bold text-slate-800 text-[10px] truncate">{res.title}</h5><p className="text-[8px] text-slate-400 font-bold uppercase">{res.year}</p></div>
-                           </div>
-                         ))}
-                       </div>
-                     )}
-                   </div>
+              <form onSubmit={handleAddEdit} className="flex-1 overflow-y-auto p-12 space-y-12 custom-scrollbar">
+                
+                {/* --- EDITOR DE PELÍCULAS --- */}
+                {view === 'Movies' && !currentContext && (
+                  <div className="space-y-12">
+                    {!editItem && (
+                      <div className="p-10 bg-indigo-50/20 rounded-[3rem] border border-indigo-100/30">
+                        <label className="text-[11px] font-black text-indigo-400 uppercase tracking-widest mb-5 block">Inteligencia TMDB (Búsqueda)</label>
+                        <div className="flex space-x-3">
+                          <input id="tmdb-query" placeholder="Buscar título de película..." className="flex-1 px-8 py-5 bg-white border border-indigo-50 rounded-3xl outline-none font-bold" />
+                          <button type="button" onClick={searchTmdb} disabled={isSearchingTmdb} className="px-10 bg-[#4f46e5] text-white rounded-3xl font-black text-xs uppercase tracking-widest flex items-center space-x-3 active:scale-95 shadow-xl shadow-indigo-100">
+                            {isSearchingTmdb ? <Loader2 className="animate-spin" size={18} /> : <SearchIcon size={18} />}
+                            <span>Buscar</span>
+                          </button>
+                        </div>
+                        {tmdbSearchResults.length > 0 && (
+                          <div className="grid grid-cols-3 gap-6 mt-8">
+                            {tmdbSearchResults.map((res, i) => (
+                              <div key={i} onClick={() => selectTmdbResult(res)} className="p-4 bg-white rounded-[2rem] shadow-sm hover:shadow-xl cursor-pointer border border-indigo-50/50 transition-all flex items-center space-x-4 group active:scale-95">
+                                <img src={res.poster} className="w-12 h-18 object-cover rounded-xl shadow-sm" />
+                                <div className="flex-1 min-w-0"><h5 className="font-bold text-slate-900 text-xs truncate group-hover:text-[#4f46e5]">{res.title}</h5><p className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">{res.year}</p></div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                    <div className="grid grid-cols-2 gap-8">
+                      <div className="col-span-full"><label className="block text-[11px] font-black text-slate-400 uppercase tracking-widest mb-3 px-2">Título de Película</label><input name="title" required defaultValue={editItem?.title} className="w-full px-8 py-5 bg-slate-50 border-none rounded-3xl outline-none font-bold text-lg" /></div>
+                      <div><label className="block text-[11px] font-black text-slate-400 uppercase tracking-widest mb-3 px-2">Nombre Original</label><input name="title_original" defaultValue={editItem?.title_original} className="w-full px-8 py-5 bg-slate-50 border-none rounded-3xl outline-none font-bold" /></div>
+                      <div className="grid grid-cols-2 gap-5">
+                        <div><label className="block text-[11px] font-black text-slate-400 uppercase tracking-widest mb-3 px-2">Año</label><input name="year" type="number" defaultValue={editItem?.year} className="w-full px-8 py-5 bg-slate-50 border-none rounded-3xl outline-none font-bold" /></div>
+                        <div><label className="block text-[11px] font-black text-slate-400 uppercase tracking-widest mb-3 px-2">Rating</label><input name="rating" type="number" step="0.1" defaultValue={editItem?.rating} className="w-full px-8 py-5 bg-slate-50 border-none rounded-3xl outline-none font-bold" /></div>
+                      </div>
+                      <div className="col-span-full"><label className="block text-[11px] font-black text-slate-400 uppercase tracking-widest mb-3 px-2">Géneros (Separados por coma)</label><input name="genres" defaultValue={(editItem?.genres || []).join(', ')} className="w-full px-8 py-5 bg-slate-50 border-none rounded-3xl outline-none font-bold" /></div>
+                      <div><label className="block text-[11px] font-black text-slate-400 uppercase tracking-widest mb-3 px-2">URL Póster</label><input name="poster" defaultValue={editItem?.poster} onChange={(e) => setPosterPreviewUrl(e.target.value)} className="w-full px-8 py-5 bg-slate-50 border-none rounded-3xl outline-none font-bold" /></div>
+                      <div><label className="block text-[11px] font-black text-slate-400 uppercase tracking-widest mb-3 px-2">URL Banner</label><input name="banner" defaultValue={editItem?.banner} onChange={(e) => setBannerPreviewUrl(e.target.value)} className="w-full px-8 py-5 bg-slate-50 border-none rounded-3xl outline-none font-bold" /></div>
+                      <div className="col-span-full"><label className="block text-[11px] font-black text-slate-400 uppercase tracking-widest mb-3 px-2">ID Youtube (Trailer)</label><input name="id_youtube" defaultValue={editItem?.id_youtube} className="w-full px-8 py-5 bg-slate-50 border-none rounded-3xl outline-none font-bold" /></div>
+                      <div className="col-span-full"><label className="block text-[11px] font-black text-slate-400 uppercase tracking-widest mb-3 px-2">TMDB ID</label><input name="TMDB_id" type="number" defaultValue={editItem?.TMDB_id} className="w-full px-8 py-5 bg-slate-50 border-none rounded-3xl outline-none font-bold" /></div>
+                      <div className="col-span-full"><label className="block text-[11px] font-black text-slate-400 uppercase tracking-widest mb-3 px-2">Sinopsis</label><textarea name="description" defaultValue={editItem?.description} className="w-full h-40 px-10 py-8 bg-slate-50 border-none rounded-[3rem] outline-none font-medium text-slate-700 resize-none leading-relaxed" /></div>
+                    </div>
+                  </div>
                 )}
 
-                <div className="space-y-6">
-                  <h5 className="text-xs font-black text-slate-800 uppercase tracking-wider pl-4 border-l-4 border-indigo-500">Datos Principales</h5>
-                  <div className="grid grid-cols-2 gap-6">
-                    <div className="col-span-full">
-                      <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 px-1">Nombre / Título</label>
-                      <input name="title" required defaultValue={editItem?.title || editItem?.name} className="w-full px-6 py-4 bg-slate-50 border-none rounded-2xl outline-none font-bold focus:bg-slate-100 transition-colors" />
-                    </div>
-
-                    {(!currentContext || currentContext.type === 'series' || currentContext.type === 'season') && (
-                      <>
-                        <div><label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 px-1">Título Original</label><input name="title_original" defaultValue={editItem?.title_original} className="w-full px-6 py-4 bg-slate-50 border-none rounded-2xl outline-none font-bold" /></div>
-                        <div className="grid grid-cols-2 gap-4">
-                          <div><label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 px-1">Año</label><input name="year" type="number" defaultValue={editItem?.year} className="w-full px-6 py-4 bg-slate-50 border-none rounded-2xl outline-none font-bold" /></div>
-                          <div><label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 px-1">Rating</label><input name="rating" type="number" step="0.1" defaultValue={editItem?.rating} className="w-full px-6 py-4 bg-slate-50 border-none rounded-2xl outline-none font-bold" /></div>
+                {/* --- EDITOR DE SERIES --- */}
+                {view === 'Series' && !currentContext && (
+                  <div className="space-y-12">
+                    {!editItem && (
+                      <div className="p-10 bg-indigo-50/20 rounded-[3rem] border border-indigo-100/30">
+                        <label className="text-[11px] font-black text-indigo-400 uppercase tracking-widest mb-5 block">Inteligencia TMDB (Búsqueda)</label>
+                        <div className="flex space-x-3">
+                          <input id="tmdb-query" placeholder="Buscar título de serie..." className="flex-1 px-8 py-5 bg-white border border-indigo-50 rounded-3xl outline-none font-bold" />
+                          <button type="button" onClick={searchTmdb} disabled={isSearchingTmdb} className="px-10 bg-[#4f46e5] text-white rounded-3xl font-black text-xs uppercase tracking-widest flex items-center space-x-3 active:scale-95 shadow-xl shadow-indigo-100">
+                            {isSearchingTmdb ? <Loader2 className="animate-spin" size={18} /> : <SearchIcon size={18} />}
+                            <span>Buscar</span>
+                          </button>
                         </div>
-                        <div className="col-span-full"><label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 px-1">TMDB ID</label><input name="TMDB_id" type="number" defaultValue={editItem?.TMDB_id} className="w-full px-6 py-4 bg-slate-50 border-none rounded-2xl outline-none font-bold" placeholder="ID numérico de TMDB" /></div>
-                      </>
+                        {tmdbSearchResults.length > 0 && (
+                          <div className="grid grid-cols-3 gap-6 mt-8">
+                            {tmdbSearchResults.map((res, i) => (
+                              <div key={i} onClick={() => selectTmdbResult(res)} className="p-4 bg-white rounded-[2rem] shadow-sm hover:shadow-xl cursor-pointer border border-indigo-50/50 transition-all flex items-center space-x-4 group active:scale-95">
+                                <img src={res.poster} className="w-12 h-18 object-cover rounded-xl shadow-sm" />
+                                <div className="flex-1 min-w-0"><h5 className="font-bold text-slate-900 text-xs truncate group-hover:text-[#4f46e5]">{res.title}</h5><p className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">{res.year}</p></div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
                     )}
-
-                    {view === 'Series' && !currentContext && (
+                    <div className="grid grid-cols-2 gap-8">
+                      <div className="col-span-full"><label className="block text-[11px] font-black text-slate-400 uppercase tracking-widest mb-3 px-2">Título de Serie</label><input name="title" required defaultValue={editItem?.title} className="w-full px-8 py-5 bg-slate-50 border-none rounded-3xl outline-none font-bold text-lg" /></div>
+                      <div><label className="block text-[11px] font-black text-slate-400 uppercase tracking-widest mb-3 px-2">Nombre Original</label><input name="title_original" defaultValue={editItem?.title_original} className="w-full px-8 py-5 bg-slate-50 border-none rounded-3xl outline-none font-bold" /></div>
+                      <div className="grid grid-cols-2 gap-5">
+                        <div><label className="block text-[11px] font-black text-slate-400 uppercase tracking-widest mb-3 px-2">Año</label><input name="year" type="number" defaultValue={editItem?.year} className="w-full px-8 py-5 bg-slate-50 border-none rounded-3xl outline-none font-bold" /></div>
+                        <div><label className="block text-[11px] font-black text-slate-400 uppercase tracking-widest mb-3 px-2">Rating</label><input name="rating" type="number" step="0.1" defaultValue={editItem?.rating} className="w-full px-8 py-5 bg-slate-50 border-none rounded-3xl outline-none font-bold" /></div>
+                      </div>
                       <div>
-                        <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 px-1">Estado Serie</label>
-                        <select name="status" defaultValue={editItem?.status || 'ongoing'} className="w-full px-6 py-4 bg-slate-50 border-none rounded-2xl outline-none font-bold appearance-none">
-                          <option value="ongoing">En Emisión (Ongoing)</option>
-                          <option value="ended">Finalizada (Ended)</option>
+                        <label className="block text-[11px] font-black text-slate-400 uppercase tracking-widest mb-3 px-2">Estado</label>
+                        <select name="status" defaultValue={editItem?.status || 'ongoing'} className="w-full px-8 py-5 bg-slate-50 border-none rounded-3xl outline-none font-bold appearance-none">
+                          <option value="ongoing">En Emisión</option>
+                          <option value="ended">Finalizada</option>
                         </select>
                       </div>
-                    )}
-
-                    {currentContext?.type === 'series' && (
-                       <div><label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 px-1">Número de Temporada</label><input name="seasonNumber" type="number" defaultValue={editItem?.seasonNumber} className="w-full px-6 py-4 bg-slate-50 border-none rounded-2xl outline-none font-bold" /></div>
-                    )}
-
-                    {currentContext?.type === 'season' && (
-                       <div className="grid grid-cols-2 gap-4">
-                        <div><label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 px-1">Episodio #</label><input name="episodeNumber" type="number" defaultValue={editItem?.episodeNumber} className="w-full px-6 py-4 bg-slate-50 border-none rounded-2xl outline-none font-bold" /></div>
-                        <div><label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 px-1">Duración (min)</label><input name="duration" type="number" defaultValue={editItem?.duration} className="w-full px-6 py-4 bg-slate-50 border-none rounded-2xl outline-none font-bold" /></div>
-                       </div>
-                    )}
-                  </div>
-                </div>
-
-                {(!currentContext || currentContext.type === 'season') && (
-                  <div className="space-y-6">
-                    <h5 className="text-xs font-black text-slate-800 uppercase tracking-wider pl-4 border-l-4 border-indigo-500">Recursos Visuales</h5>
-                    <div className="grid grid-cols-2 gap-6">
-                      <div className="col-span-full">
-                        <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 px-1">YouTube ID (Trailer Key)</label>
-                        <input name="id_youtube" defaultValue={editItem?.id_youtube} className="w-full px-6 py-4 bg-slate-50 border-none rounded-2xl outline-none font-bold" />
-                      </div>
-                      <div>
-                        <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 px-1">{currentContext?.type === 'season' ? 'URL Thumbnail (Episode)' : 'URL Póster'}</label>
-                        <input name={currentContext?.type === 'season' ? 'thumbnail' : 'poster'} defaultValue={editItem?.poster || editItem?.thumbnail} onChange={(e) => setPosterPreviewUrl(e.target.value)} className="w-full px-6 py-4 bg-slate-50 border-none rounded-2xl outline-none font-bold" />
-                      </div>
-                      <div>
-                        <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 px-1">URL Banner</label>
-                        <input name="banner" defaultValue={editItem?.banner} onChange={(e) => setBannerPreviewUrl(e.target.value)} className="w-full px-6 py-4 bg-slate-50 border-none rounded-2xl outline-none font-bold" />
-                      </div>
+                      <div className="col-span-full"><label className="block text-[11px] font-black text-slate-400 uppercase tracking-widest mb-3 px-2">TMDB ID</label><input name="TMDB_id" type="number" defaultValue={editItem?.TMDB_id} className="w-full px-8 py-5 bg-slate-50 border-none rounded-3xl outline-none font-bold" /></div>
+                      <div><label className="block text-[11px] font-black text-slate-400 uppercase tracking-widest mb-3 px-2">URL Póster</label><input name="poster" defaultValue={editItem?.poster} onChange={(e) => setPosterPreviewUrl(e.target.value)} className="w-full px-8 py-5 bg-slate-50 border-none rounded-3xl outline-none font-bold" /></div>
+                      <div><label className="block text-[11px] font-black text-slate-400 uppercase tracking-widest mb-3 px-2">URL Banner</label><input name="banner" defaultValue={editItem?.banner} onChange={(e) => setBannerPreviewUrl(e.target.value)} className="w-full px-8 py-5 bg-slate-50 border-none rounded-3xl outline-none font-bold" /></div>
+                      <div className="col-span-full"><label className="block text-[11px] font-black text-slate-400 uppercase tracking-widest mb-3 px-2">Sinopsis</label><textarea name="description" defaultValue={editItem?.description} className="w-full h-40 px-10 py-8 bg-slate-50 border-none rounded-[3rem] outline-none font-medium text-slate-700 resize-none leading-relaxed" /></div>
                     </div>
                   </div>
                 )}
 
+                {/* --- EDITOR DE TEMPORADAS --- */}
+                {currentContext?.type === 'series' && (
+                  <div className="space-y-12">
+                    {editItem && (
+                      <div className="flex justify-end">
+                        <button type="button" onClick={updateSeasonFromTmdb} disabled={isUpdatingFromTmdb} className="px-8 py-4 bg-indigo-600 text-white rounded-3xl font-black text-xs uppercase tracking-widest flex items-center space-x-3 active:scale-95 shadow-xl shadow-indigo-100 disabled:opacity-50">
+                          {isUpdatingFromTmdb ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} />}
+                          <span>Actualizar desde TMDB</span>
+                        </button>
+                      </div>
+                    )}
+                    <div className="grid grid-cols-2 gap-8">
+                      <div className="col-span-full"><label className="block text-[11px] font-black text-slate-400 uppercase tracking-widest mb-3 px-2">Título de Temporada</label><input name="name" defaultValue={editItem?.name} className="w-full px-8 py-5 bg-slate-50 border-none rounded-3xl outline-none font-bold text-lg" placeholder="Ejem: Temporada 1" /></div>
+                      <div className="grid grid-cols-2 gap-5">
+                        <div><label className="block text-[11px] font-black text-slate-400 uppercase tracking-widest mb-3 px-2">Nº de Orden (Season #)</label><input name="seasonNumber" type="number" defaultValue={editItem?.seasonNumber} className="w-full px-8 py-5 bg-slate-50 border-none rounded-3xl outline-none font-bold" /></div>
+                        <div><label className="block text-[11px] font-black text-slate-400 uppercase tracking-widest mb-3 px-2">Año</label><input name="year" type="number" defaultValue={editItem?.year} className="w-full px-8 py-5 bg-slate-50 border-none rounded-3xl outline-none font-bold" /></div>
+                      </div>
+                      <div className="col-span-full"><label className="block text-[11px] font-black text-slate-400 uppercase tracking-widest mb-3 px-2">URL del Banner (Temporada)</label><input name="banner" defaultValue={editItem?.banner} onChange={(e) => setBannerPreviewUrl(e.target.value)} className="w-full px-8 py-5 bg-slate-50 border-none rounded-3xl outline-none font-bold text-indigo-500 text-xs" placeholder="https://image.tmdb.org/..." /></div>
+                    </div>
+                  </div>
+                )}
+
+                {/* --- EDITOR DE EPISODIOS --- */}
+                {currentContext?.type === 'season' && (
+                  <div className="space-y-12">
+                    {editItem && (
+                      <div className="flex justify-end">
+                        <button type="button" onClick={updateEpisodeFromTmdb} disabled={isUpdatingFromTmdb} className="px-8 py-4 bg-indigo-600 text-white rounded-3xl font-black text-xs uppercase tracking-widest flex items-center space-x-3 active:scale-95 shadow-xl shadow-indigo-100 disabled:opacity-50">
+                          {isUpdatingFromTmdb ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} />}
+                          <span>Actualizar desde TMDB</span>
+                        </button>
+                      </div>
+                    )}
+                    <div className="grid grid-cols-2 gap-8">
+                      <div className="col-span-full"><label className="block text-[11px] font-black text-slate-400 uppercase tracking-widest mb-3 px-2">Título del Episodio</label><input name="title" defaultValue={editItem?.title} className="w-full px-8 py-5 bg-slate-50 border-none rounded-3xl outline-none font-bold text-lg" /></div>
+                      <div className="grid grid-cols-2 gap-5">
+                        <div><label className="block text-[11px] font-black text-slate-400 uppercase tracking-widest mb-3 px-2">Número Episodio #</label><input name="episodeNumber" type="number" defaultValue={editItem?.episodeNumber} className="w-full px-8 py-5 bg-slate-50 border-none rounded-3xl outline-none font-bold" /></div>
+                        <div><label className="block text-[11px] font-black text-slate-400 uppercase tracking-widest mb-3 px-2">Duración (min)</label><input name="duration" type="number" defaultValue={editItem?.duration} className="w-full px-8 py-5 bg-slate-50 border-none rounded-3xl outline-none font-bold" /></div>
+                      </div>
+                      <div className="col-span-full"><label className="block text-[11px] font-black text-slate-400 uppercase tracking-widest mb-3 px-2">URL Miniatura (still_path)</label><input name="thumbnail" defaultValue={editItem?.thumbnail} onChange={(e) => setPosterPreviewUrl(e.target.value)} className="w-full px-8 py-5 bg-slate-50 border-none rounded-3xl outline-none font-bold text-indigo-500 text-xs" /></div>
+                      <div className="col-span-full"><label className="block text-[11px] font-black text-slate-400 uppercase tracking-widest mb-3 px-2">Sinopsis Episodio</label><textarea name="overview" defaultValue={editItem?.overview} className="w-full h-40 px-10 py-8 bg-slate-50 border-none rounded-[3rem] outline-none font-medium text-slate-700 resize-none leading-relaxed" /></div>
+                    </div>
+                  </div>
+                )}
+
+                {/* --- EDITOR DE SERVIDORES (VIDEOS) --- */}
                 {(currentContext?.type === 'episode' || currentContext?.type === 'movie_videos') && (
-                  <div className="space-y-6">
-                    <h5 className="text-xs font-black text-slate-800 uppercase tracking-wider pl-4 border-l-4 border-indigo-500">Configuración de Video</h5>
-                    <div className="grid grid-cols-2 gap-6">
-                       <div><label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 px-1">Servidor</label><input name="server" required defaultValue={editItem?.server} className="w-full px-6 py-4 bg-slate-50 border-none rounded-2xl outline-none font-bold" /></div>
-                       <div className="grid grid-cols-2 gap-4">
-                         <div><label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 px-1">Idioma</label><input name="language" defaultValue={editItem?.language || 'LAT'} className="w-full px-6 py-4 bg-slate-50 border-none rounded-2xl outline-none font-bold" /></div>
-                         <div><label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 px-1">Calidad</label><input name="quality" defaultValue={editItem?.quality || '1080p'} className="w-full px-6 py-4 bg-slate-50 border-none rounded-2xl outline-none font-bold" /></div>
-                       </div>
-                       <div className="col-span-full"><label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 px-1">URL Directa / Embed</label><input name="url" required defaultValue={editItem?.url} className="w-full px-6 py-4 bg-slate-50 border-none rounded-2xl outline-none font-bold" /></div>
-                       <div><label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 px-1">Formato</label><input name="format" defaultValue={editItem?.format || 'embed'} className="w-full px-6 py-4 bg-slate-50 border-none rounded-2xl outline-none font-bold" /></div>
+                  <div className="space-y-12">
+                    <div className="grid grid-cols-2 gap-8">
+                      <div><label className="block text-[11px] font-black text-slate-400 uppercase tracking-widest mb-3 px-2">Nombre Servidor</label><input name="server" required defaultValue={editItem?.server} className="w-full px-8 py-5 bg-slate-50 border-none rounded-3xl outline-none font-bold" /></div>
+                      <div className="grid grid-cols-2 gap-5">
+                        <div><label className="block text-[11px] font-black text-slate-400 uppercase tracking-widest mb-3 px-2">Idioma</label><input name="language" defaultValue={editItem?.language || 'LAT'} className="w-full px-8 py-5 bg-slate-50 border-none rounded-3xl outline-none font-bold" /></div>
+                        <div><label className="block text-[11px] font-black text-slate-400 uppercase tracking-widest mb-3 px-2">Calidad</label><input name="quality" defaultValue={editItem?.quality || '1080p'} className="w-full px-8 py-5 bg-slate-50 border-none rounded-3xl outline-none font-bold" /></div>
+                      </div>
+                      <div className="col-span-full"><label className="block text-[11px] font-black text-slate-400 uppercase tracking-widest mb-3 px-2">URL del Video (Embed)</label><input name="url" required defaultValue={editItem?.url} className="w-full px-8 py-5 bg-slate-50 border-none rounded-3xl outline-none font-bold text-indigo-500 font-mono text-sm" /></div>
+                      <div><label className="block text-[11px] font-black text-slate-400 uppercase tracking-widest mb-3 px-2">Formato</label><input name="format" defaultValue={editItem?.format || 'embed'} className="w-full px-8 py-5 bg-slate-50 border-none rounded-3xl outline-none font-bold" /></div>
                     </div>
                   </div>
                 )}
 
-                <div className="col-span-full">
-                  <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 px-1">Descripción / Overview</label>
-                  <textarea name={currentContext?.type === 'season' ? 'overview' : 'description'} defaultValue={editItem?.description || editItem?.overview} className="w-full h-32 px-6 py-4 bg-slate-50 border-none rounded-3xl outline-none font-medium text-slate-600 resize-none leading-relaxed focus:bg-slate-100 transition-colors" />
-                </div>
-
-                <footer className="pt-8 flex justify-end space-x-4 border-t border-slate-50">
-                  <button type="button" onClick={() => setIsModalOpen(false)} className="px-8 py-4 text-slate-400 font-black text-[10px] uppercase tracking-widest">Cancelar</button>
-                  <button type="submit" disabled={isSaving} className="px-12 py-4 bg-indigo-600 text-white rounded-2xl font-black text-xs uppercase tracking-widest shadow-xl flex items-center space-x-2 shadow-indigo-100 transition-all active:scale-95 hover:bg-indigo-700">
-                    {isSaving ? <Loader2 className="animate-spin" /> : <Save size={18} />}
-                    <span>Guardar Registro</span>
+                <footer className="pt-10 flex justify-end space-x-6 border-t border-slate-50">
+                  <button type="button" onClick={() => setIsModalOpen(false)} className="px-10 py-5 text-slate-400 font-black text-xs uppercase tracking-[0.2em] hover:text-slate-800 transition-colors">Cancelar</button>
+                  <button type="submit" disabled={isSaving} className="px-14 py-5 bg-gradient-to-br from-[#4f46e5] to-[#7c3aed] text-white rounded-3xl font-black text-xs uppercase tracking-[0.2em] shadow-2xl flex items-center space-x-3 shadow-indigo-200 transition-all hover:scale-105 active:scale-95">
+                    {isSaving ? <Loader2 className="animate-spin" /> : <Save size={20} />}
+                    <span>Confirmar y Guardar</span>
                   </button>
                 </footer>
               </form>
@@ -744,21 +939,30 @@ const App = () => {
 
       {/* MODAL BULK URLS */}
       {isBatchOpen && (
-        <div className="fixed inset-0 z-[60] flex items-center justify-center p-6 bg-slate-900/60 backdrop-blur-md animate-fade-in">
-          <div className="bg-white w-full max-w-2xl rounded-[3rem] shadow-2xl p-10 border border-white/20">
-            <h3 className="text-2xl font-black text-slate-800 mb-2 italic">Carga Masiva de Vídeos</h3>
-            <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-8">Pega una URL por línea para asignar a episodios secuenciales</p>
-            <form onSubmit={handleBatchProcess} className="space-y-6">
-              <div className="grid grid-cols-2 gap-4">
-                <input name="startEp" type="number" defaultValue={1} className="px-6 py-4 bg-slate-50 rounded-2xl outline-none font-bold shadow-inner" placeholder="Epi. Inicial" />
-                <input name="server" defaultValue="Streamtape" className="px-6 py-4 bg-slate-50 rounded-2xl outline-none font-bold shadow-inner" placeholder="Servidor" />
+        <div className="fixed inset-0 z-[60] flex items-center justify-center p-6 bg-[#0f172a]/80 backdrop-blur-xl animate-fade-in">
+          <div className="bg-white w-full max-w-2xl rounded-[4rem] shadow-2xl p-14 border border-white/20">
+            <h3 className="text-3xl font-black text-slate-900 mb-2 italic tracking-tighter">Importación Masiva</h3>
+            <p className="text-[11px] font-black text-slate-400 uppercase tracking-widest mb-10">Generación automática de fuentes para episodios</p>
+            <form onSubmit={handleBatchProcess} className="space-y-8">
+              <div className="grid grid-cols-2 gap-6">
+                <div>
+                  <label className="block text-[11px] font-black text-slate-400 uppercase tracking-widest mb-3 px-2">Episodio de Inicio</label>
+                  <input name="startEp" type="number" defaultValue={1} className="w-full px-8 py-5 bg-slate-50 rounded-3xl outline-none font-bold shadow-sm" />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-black text-slate-400 uppercase tracking-widest mb-3 px-2">Nombre del Servidor</label>
+                  <input name="server" defaultValue="Streamtape" className="w-full px-8 py-5 bg-slate-50 rounded-3xl outline-none font-bold shadow-sm" />
+                </div>
               </div>
-              <textarea name="urls" required className="w-full h-40 px-6 py-4 bg-slate-50 border-none rounded-3xl outline-none font-medium text-[10px] resize-none shadow-inner" placeholder="Pega aquí las URLs..." />
-              <div className="flex space-x-4">
-                <button type="button" onClick={() => setIsBatchOpen(false)} className="flex-1 py-4 bg-slate-100 text-slate-400 rounded-2xl font-black text-xs uppercase tracking-widest">Cerrar</button>
-                <button type="submit" disabled={isSaving} className="flex-1 py-4 bg-indigo-600 text-white rounded-2xl font-black text-xs uppercase tracking-widest shadow-xl flex items-center justify-center space-x-2 active:scale-95 shadow-indigo-100">
-                   {isSaving ? <Loader2 className="animate-spin" /> : <Plus size={16} />}
-                   <span>Procesar Lote</span>
+              <div>
+                <label className="block text-[11px] font-black text-slate-400 uppercase tracking-widest mb-3 px-2">Lista de URLs (Una por línea)</label>
+                <textarea name="urls" required className="w-full h-52 px-8 py-6 bg-slate-50 border-none rounded-[2.5rem] outline-none font-medium text-xs resize-none shadow-sm leading-relaxed" placeholder="https://..." />
+              </div>
+              <div className="flex space-x-5 pt-4">
+                <button type="button" onClick={() => setIsBatchOpen(false)} className="flex-1 py-5 bg-slate-100 text-slate-400 rounded-3xl font-black text-xs uppercase tracking-widest transition-colors hover:text-slate-600">Cerrar</button>
+                <button type="submit" disabled={isSaving} className="flex-1 py-5 bg-[#4f46e5] text-white rounded-3xl font-black text-xs uppercase tracking-widest shadow-xl flex items-center justify-center space-x-3 active:scale-95 shadow-indigo-100">
+                   {isSaving ? <Loader2 className="animate-spin" /> : <Plus size={18} />}
+                   <span>Procesar Ahora</span>
                 </button>
               </div>
             </form>
